@@ -5,6 +5,9 @@
 
 use std::io::{self, Write};
 
+// Naming the import module makes this an explicit import. Without it, newer linkers
+// treat `emit` as an undefined symbol and fail the build.
+#[link(wasm_import_module = "env")]
 unsafe extern "C" {
     fn emit(kind: u32, ptr: *const u8, len: usize);
 }

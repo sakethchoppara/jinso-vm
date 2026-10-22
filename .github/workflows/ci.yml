@@ -9,6 +9,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
+          targets: wasm32-unknown-unknown
       - run: cargo test
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo run --example fuzz -- 60
+      # the playground build, so a broken wasm link fails here and not only in the deploy
+      - run: ./scripts/build-web.sh
