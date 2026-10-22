@@ -115,6 +115,15 @@ struct Frame {
 /// the open upvalues. Marking follows array elements, closures' upvalues and closed
 /// upvalues' values from there.
 pub fn run(chunk: &Chunk, out: &mut impl Write, gc_stress: bool) -> Result<Stats, String> {
+    run_limited(chunk, out, gc_stress, u64::MAX)
+}
+
+/// `run`, but stops with an error after `steps` loop iterations plus function calls. Those
+/// are the only ways a program runs long (everything else moves forward through finite
+/// code), so a budget on them bounds any program. The fuzzer uses it to tell a program
+/// that never ends from a hang in the VM.
+pub fn run_limited(chunk: &Chunk, out: &mut impl Write, gc_stress: bool, steps: u64) -> Result<Stats, String> {
+    let mut steps = steps;
     let mut heap = Heap::new(&chunk.strings, gc_stress);
     let mut stack: Vec<Value> = Vec::with_capacity(256);
     let mut globals: Vec<Option<Value>> = chunk
@@ -200,7 +209,10 @@ pub fn run(chunk: &Chunk, out: &mut impl Write, gc_stress: bool) -> Result<Stats
             Op::GetLocal => stack.push(stack[base + arg]),
             Op::SetLocal => stack[base + arg] = stack.pop().unwrap(),
             Op::Jump => ip += arg,
-            Op::Loop => ip -= arg,
+            Op::Loop => {
+                steps = steps.checked_sub(1).ok_or_else(|| err("step limit reached".into()))?;
+                ip -= arg;
+            }
             Op::JumpIfFalse => match stack.pop().unwrap() {
                 Value::Bool(true) => {}
                 Value::Bool(false) => ip += arg,
@@ -238,6 +250,7 @@ pub fn run(chunk: &Chunk, out: &mut impl Write, gc_stress: bool) -> Result<Stats
                 if frames.len() == MAX_FRAMES {
                     return Err(err(format!("stack overflow (more than {MAX_FRAMES} nested calls)")));
                 }
+                steps = steps.checked_sub(1).ok_or_else(|| err("step limit reached".into()))?;
                 frames.push(Frame { return_ip: ip, base, closure });
                 base = stack.len() - argc;
                 closure = callee_closure;

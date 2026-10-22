@@ -503,3 +503,19 @@ fn compare_and_branch() {
         assert!(err.contains(want), "{src}: got {err:?}");
     }
 }
+
+#[test]
+fn step_budget_stops_programs_that_never_end() {
+    let limited = |src: &str| {
+        let chunk = lumen::compile(src).unwrap();
+        lumen::vm::run_limited(&chunk, &mut Vec::new(), false, 10_000).unwrap_err()
+    };
+    // an endless loop, and recursion whose call count is effectively unbounded (2^4096)
+    assert!(limited("let i = 0;\nwhile true { i = i + 1; }").contains("line 2: step limit reached"));
+    assert!(limited("fn f(n) { if n == 0 { return 0; } return f(n - 1) + f(n - 1); }\nprint f(4000);").contains("step limit reached"));
+    // a program within budget runs normally
+    let chunk = lumen::compile("let i = 0; while i < 100 { i = i + 1; } print i;").unwrap();
+    let mut out = Vec::new();
+    lumen::vm::run_limited(&chunk, &mut out, false, 10_000).unwrap();
+    assert_eq!(out, b"100\n");
+}

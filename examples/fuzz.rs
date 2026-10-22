@@ -14,6 +14,9 @@ const VOCAB: &[&str] = &[
     "x", "y", "f", "g", "0", "1", "2", "-1", "9223372036854775807", "\"s\"", "\"\"", "// c\n", "\n",
     "@", "\"open", "99999999999999999999",
     "[", "]", "[]", "len", "push", "a", "a[0]", "push(a, a)",
+    // closure fragments: nested functions that capture, return and call each other
+    "fn f() {", "fn g(x) { return x + y; }", "fn h() { y = y + 1; return h; }", "let y = 0;",
+    "return g;", "f()()", "g(1)", "h()()",
 ];
 
 /// xorshift64: plenty for picking tokens, and no dependency.
@@ -85,9 +88,10 @@ fn mutate(rng: &mut Rng, corpus: &[String]) -> String {
 fn check(src: &str, gc_stress: bool) {
     let Ok(chunk) = lumen::compile(src) else { return };
     lumen::disasm::disassemble(&chunk);
-    // A mutated `while` can loop forever, so only loop-free programs execute. Recursion is
-    // still fine: MAX_FRAMES turns runaway recursion into an error.
+    // Only loop-free programs execute: a loop can double a string 30 times and allocate
+    // gigabytes before any limit trips. Recursion still runs, under a step budget, since
+    // a mutated fib(9223372036854775807) branches twice per call and would never finish.
     if !src.contains("while") {
-        let _ = lumen::vm::run(&chunk, &mut std::io::sink(), gc_stress);
+        let _ = lumen::vm::run_limited(&chunk, &mut std::io::sink(), gc_stress, 100_000);
     }
 }
