@@ -1,0 +1,13 @@
+diff --git a/src/gc.rs b/src/gc.rs
+index df0e26a..de6d52b 100644
+--- a/src/gc.rs
++++ b/src/gc.rs
+@@ -226,7 +226,7 @@ impl Heap {
+             obj.marked = true;
+             match &obj.kind {
+                 Kind::Str(_) => {}
+-                Kind::Array(items) => work.extend(items.iter().filter_map(|v| v.handle())),
++                Kind::Array(_) => {}
+                 Kind::Closure { upvalues, .. } => work.extend(upvalues),
+                 // An open upvalue's value is on the stack, which is already a root.
+                 Kind::Upvalue(Upvalue::Open(_)) => {}

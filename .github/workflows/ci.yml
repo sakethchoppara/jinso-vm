@@ -15,3 +15,5 @@ jobs:
       - run: cargo run --example fuzz -- 60
       # the playground build, so a broken wasm link fails here and not only in the deploy
       - run: ./scripts/build-web.sh
+      # every deliberate GC bug in scripts/mutants/ must make some test fail (~1 minute)
+      - run: ./scripts/root_removal.sh

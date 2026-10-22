@@ -1,0 +1,13 @@
+diff --git a/src/gc.rs b/src/gc.rs
+index df0e26a..d52a5d2 100644
+--- a/src/gc.rs
++++ b/src/gc.rs
+@@ -230,7 +230,7 @@ impl Heap {
+                 Kind::Closure { upvalues, .. } => work.extend(upvalues),
+                 // An open upvalue's value is on the stack, which is already a root.
+                 Kind::Upvalue(Upvalue::Open(_)) => {}
+-                Kind::Upvalue(Upvalue::Closed(v)) => work.extend(v.handle()),
++                Kind::Upvalue(Upvalue::Closed(_)) => {}
+             }
+             self.peak_work = self.peak_work.max(work.len());
+         }

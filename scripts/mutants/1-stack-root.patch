@@ -1,0 +1,13 @@
+diff --git a/src/vm.rs b/src/vm.rs
+index 42b9427..c78c760 100644
+--- a/src/vm.rs
++++ b/src/vm.rs
+@@ -153,7 +153,7 @@ pub fn run_limited(chunk: &Chunk, out: &mut impl Write, gc_stress: bool, steps:
+         macro_rules! maybe_collect {
+             () => {
+                 if heap.should_collect() {
+-                    let values = stack.iter().chain(globals.iter().flatten()).chain(&chunk.constants);
++                    let values = globals.iter().flatten().chain(&chunk.constants);
+                     heap.collect(values.filter_map(|v| v.handle()).chain(open.handles()));
+                 }
+             };

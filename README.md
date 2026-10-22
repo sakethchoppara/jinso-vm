@@ -239,7 +239,10 @@ missing root crashes immediately instead of reading a recycled object. The whole
 runs in both modes and must produce identical output.
 
 **Root-removal experiment.** Each root and each edge marking follows was removed on purpose,
-to check that some test fails:
+to check that some test fails. `scripts/root_removal.sh` automates this: it applies each
+deliberate bug in `scripts/mutants/` to a temporary copy of the code, runs the tests, and
+fails if any bug goes unnoticed or if a patch no longer applies to the current code. CI
+runs it on every push (it takes about 12 seconds locally). Current results:
 
 | Removed | Tests that fail |
 |---|---|
