@@ -139,8 +139,9 @@ frame's base points at the first argument, so parameters are just the callee's f
 slots. `Return` truncates the stack back to the callee and leaves the return value there.
 A frame is only `(return_ip, base)`.
 
-**Garbage collection.** Strings live in a heap of slots. Values hold a slot index, not a
-pointer, so a collector bug shows up as a "dangling handle" panic, never memory corruption.
+**Garbage collection.** Strings live in a heap of slots. Values hold a slot index (plus a
+length, see Benchmarks), not a pointer, so a collector bug shows up as a "dangling handle"
+panic, never memory corruption.
 The roots are:
 
 - the value stack, which holds every frame's arguments and locals,
@@ -159,23 +160,35 @@ deliberately to confirm the suite catches it.
 
 | Benchmark | lumen | CPython 3.13.5 | lumen vs CPython |
 |---|---|---|---|
-| fib | 0.127s | 0.112s | 1.13x slower |
-| loop | 0.588s | 0.616s | 1.05x faster |
-| strings | 0.246s | 0.018s | 13.67x slower |
+| fib | 0.132s | 0.113s | 1.17x slower |
+| loop | 0.579s | 0.612s | 1.06x faster |
+| strings | 0.075s | 0.070s | 1.07x slower |
 
 | Program | What it measures |
 |---|---|
 | `fib` | `fib(30)`: about 2.7 million recursive calls |
 | `loop` | 10 million iterations of arithmetic on locals |
-| `strings` | 100,000 appends of one character to a growing string |
+| `strings` | 1,000,000 appends of one character to a growing string |
 
 On calls and arithmetic, Lumen runs about level with CPython 3.13. CPython has years of
 tuning, including the specializing interpreter added in 3.11. Lumen pays for checking every
 integer operation for overflow and for 16-byte tagged values.
 
-On strings Lumen is far behind, for a known reason: `s = s + "x"` copies the whole string
-every time, which is O(n²). CPython spots that the old string has no other references and
-appends in place. Lumen's collector doesn't track reference counts, so it can't use that trick.
+Strings used to be the weak spot. `s = s + "x"` copied the whole string every time, which is
+O(n²): at 100,000 appends Lumen took 0.246 s to CPython's 0.018 s, 13.7x slower. CPython
+avoids the copy by checking that the old string has no other references and resizing it in
+place. Lumen has no reference counts to check, so it does this instead:
+
+- A string value is a *view*, a buffer handle plus a length. Buffers only ever grow at the end.
+- `a + b` appends `b` to `a`'s buffer in place when `a` ends exactly where the buffer ends,
+  meaning nothing has extended that buffer yet. Every other view still sees only its own
+  prefix, so strings stay immutable: after `let t = s; s = s + "x";`, `t` is unchanged.
+- If another value already grew the buffer (`let b = a + "y"; let c = a + "z";`), there's no
+  room to append, so it falls back to copying.
+
+Appends are now amortized O(1), the 100,000-append run takes 0.009 s, and at 1,000,000
+appends Lumen is level with CPython. The trade-off is that a short view keeps its whole
+buffer alive.
 
 ## Testing
 

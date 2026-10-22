@@ -103,6 +103,12 @@ fn programs() {
         ("let g = \"a\" + \"b\"; let h = \"c\" + \"d\"; print g + h;", "abcd\n"),
         // same, but a block local reachable only through the stack
         ("if true { let l = \"a\" + \"b\"; let m = \"c\" + \"d\"; print l + m; }", "abcd\n"),
+        // in-place append must not be visible through other values sharing the buffer
+        ("let s = \"ab\"; let t = s; s = s + \"c\"; t = t + \"d\"; print s; print t;", "abc\nabd\n"),
+        ("let a = \"x\"; let b = a + \"y\"; let c = a + \"z\"; print b; print c; print a;", "xy\nxz\nx\n"),
+        ("fn f() { let s = \"\"; s = s + \"a\"; return s; } print f(); print f() + f();", "a\naa\n"),
+        ("let s = \"ab\"; s = s + s; s = s + s; print s;", "abababab\n"),
+        ("let s = \"ab\"; let t = s + \"c\"; print s == \"ab\"; print t == \"abc\"; print s == t;", "true\ntrue\nfalse\n"),
         ("fn f(n) { if n == 0 { return \"\"; } let mine = \"<\" + \">\"; return mine + f(n - 1) + mine; } print f(3);",
          "<><><><><><>\n"),
     ] {
@@ -205,13 +211,14 @@ fn disassembler_marks_functions() {
     assert!(dis.contains("Call            1"), "{dis}");
 }
 
+// Prepending can't reuse a buffer, so every iteration makes a new string and the old
+// one becomes garbage (~4.5MB in total).
 const GARBAGE_LOOP: &str = "let s = \"\"; let i = 0;
-while i < 3000 { s = s + \"x\"; i = i + 1; }
+while i < 3000 { s = \"y\" + s; i = i + 1; }
 print s == s;";
 
 #[test]
 fn gc_frees_unreachable_strings() {
-    // ~4.5MB of intermediate strings, each unreachable once s moves on.
     let (out, stats) = run_with(GARBAGE_LOOP, false).unwrap();
     assert_eq!(out, "true\n");
     assert!(stats.collections >= 1, "{stats:?}");
@@ -223,9 +230,18 @@ fn gc_frees_unreachable_strings() {
 #[test]
 fn gc_stress_collects_on_every_allocation() {
     let (_, stats) = run_with(GARBAGE_LOOP, true).unwrap();
-    assert_eq!(stats.collections, 3000, "{stats:?}");
-    // After the final collection only the 3 literals and s survive; then one more alloc.
-    assert!(stats.live <= 5, "{stats:?}");
+    assert!(stats.collections > 2900, "{stats:?}");
+    // After the final collection only the 2 literals and s survive; then one more alloc.
+    assert!(stats.live <= 4, "{stats:?}");
+}
+
+#[test]
+fn appending_grows_one_buffer_in_place() {
+    // s = s + "x" extends s's buffer: no new objects, so nothing to collect even under stress.
+    let src = "let s = \"\"; let i = 0; while i < 3000 { s = s + \"x\"; i = i + 1; } print s == s;";
+    let (out, stats) = run_with(src, true).unwrap();
+    assert_eq!(out, "true\n");
+    assert_eq!((stats.collections, stats.live), (0, 2), "{stats:?}");
 }
 
 #[test]

@@ -170,9 +170,10 @@ impl Compiler {
             ExprKind::Bool(b) => self.constant(Value::Bool(*b), line)?,
             ExprKind::Nil => self.constant(Value::Nil, line)?,
             ExprKind::Str(s) => {
-                let i = self.chunk.strings.len() as u32;
+                let h = self.chunk.strings.len() as u32;
+                let len = u32::try_from(s.len()).map_err(|_| format!("line {line}: string literal too long"))?;
                 self.chunk.strings.push(s.clone());
-                self.constant(Value::Str(i), line)?;
+                self.constant(Value::Str { h, len }, line)?;
             }
             ExprKind::Var(name) => {
                 let (i, local) = self.resolve(name)?;

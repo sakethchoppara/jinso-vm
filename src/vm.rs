@@ -101,16 +101,26 @@ pub fn run(chunk: &Chunk, out: &mut impl Write, gc_stress: bool) -> Result<Stats
                 ip = frame.return_ip;
                 base = frame.base;
             }
-            Op::Add if matches!(stack[stack.len() - 2..], [Value::Str(_), Value::Str(_)]) => {
-                let Some(Value::Str(b)) = stack.pop() else { unreachable!() };
-                let Some(Value::Str(a)) = stack.pop() else { unreachable!() };
-                // Build the result as a plain String first: a and b are already off the stack
-                // (no longer roots), so they must be copied before a collection can free them.
-                let s = [heap.get(a), heap.get(b)].concat();
-                if heap.should_collect() {
-                    heap.collect(stack.iter().chain(globals.iter().flatten()).chain(&chunk.constants).copied());
+            Op::Add if matches!(stack[stack.len() - 2..], [Value::Str { .. }, Value::Str { .. }]) => {
+                let Some(Value::Str { h: bh, len: blen }) = stack.pop() else { unreachable!() };
+                let Some(Value::Str { h: ah, len: alen }) = stack.pop() else { unreachable!() };
+                if alen.checked_add(blen).is_none() {
+                    return Err(err("string too long (max 4 GiB)".into()));
                 }
-                stack.push(heap.alloc(s));
+                let v = match heap.try_append((ah, alen), (bh, blen)) {
+                    Some(v) => v,
+                    None => {
+                        // Build the result as a plain String first: a and b are already off the
+                        // stack (no longer roots), so they must be copied before a collection
+                        // can free them.
+                        let s = [heap.get(ah, alen), heap.get(bh, blen)].concat();
+                        if heap.should_collect() {
+                            heap.collect(stack.iter().chain(globals.iter().flatten()).chain(&chunk.constants).copied());
+                        }
+                        heap.alloc(s)
+                    }
+                };
+                stack.push(v);
             }
             Op::Add => int_op!(|x, y| x.checked_add(y).map(Value::Int).ok_or("integer overflow")),
             Op::Sub => int_op!(|x, y| x.checked_sub(y).map(Value::Int).ok_or("integer overflow")),
@@ -137,13 +147,13 @@ pub fn run(chunk: &Chunk, out: &mut impl Write, gc_stress: bool) -> Result<Stats
                 let b = stack.pop().unwrap();
                 let a = stack.pop().unwrap();
                 let eq = match (a, b) {
-                    (Value::Str(x), Value::Str(y)) => heap.get(x) == heap.get(y),
+                    (Value::Str { h: x, len: xl }, Value::Str { h: y, len: yl }) => heap.get(x, xl) == heap.get(y, yl),
                     _ => a == b,
                 };
                 stack.push(Value::Bool(eq));
             }
             Op::Print => match stack.pop().unwrap() {
-                Value::Str(h) => writeln!(out, "{}", heap.get(h)),
+                Value::Str { h, len } => writeln!(out, "{}", heap.get(h, len)),
                 v => writeln!(out, "{}", chunk.show(v)),
             }
             .map_err(|e| e.to_string())?,
