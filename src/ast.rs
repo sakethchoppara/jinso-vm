@@ -56,7 +56,7 @@ pub enum Stmt {
     Expr(Expr),                        // e.g. a call made for its side effects
 }
 
-// S-expression printing, used by `lumen ast` and the precedence tests.
+// S-expression printing, used by `jinso ast` and the precedence tests.
 
 impl fmt::Display for UnOp {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {

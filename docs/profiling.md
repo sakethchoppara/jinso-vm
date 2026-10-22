@@ -1,13 +1,13 @@
-# Profiling Lumen
+# Profiling Jinso
 
 ## How
 
 ```sh
 CARGO_PROFILE_RELEASE_DEBUG=line-tables-only cargo build --release --target-dir /tmp/prof
-perf record -o fib.data /tmp/prof/release/lumen run bench/fib.lm
+perf record -o fib.data /tmp/prof/release/jinso run bench/fib.jn
 perf report -i fib.data --no-children --sort symbol    # by function
 perf report -i fib.data --no-children --sort srcline   # by source line
-perf stat -e instructions ./target/release/lumen run bench/fib.lm   # noise-free count
+perf stat -e instructions ./target/release/jinso run bench/fib.jn   # noise-free count
 ```
 
 Line tables are only for profiling builds; the shipped release profile is unchanged.
@@ -20,8 +20,8 @@ inlined into `vm::run`:
 
 | Self time | Function |
 |---|---|
-| 95.6% | `lumen::vm::run` |
-| 3.7% | `lumen::upvalues::OpenUpvalues::close` (before it was inlined) |
+| 95.6% | `jinso::vm::run` |
+| 3.7% | `jinso::upvalues::OpenUpvalues::close` (before it was inlined) |
 | <0.2% each | kernel: scheduling, page faults, timers |
 
 So the useful breakdown is by source line inside `vm::run`. This one is from after the

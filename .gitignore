@@ -1,2 +1,4 @@
 /target
-/web/lumen.wasm
+/web/jinso.wasm
+perf.data
+perf.data.old

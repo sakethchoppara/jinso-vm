@@ -1,9 +1,9 @@
 const FIB: &str = "fn fib(n) {\n  if n < 2 { return n; }\n  return fib(n - 1) + fib(n - 2);\n}\nprint fib(20);";
 
-fn run_with(src: &str, gc_stress: bool) -> Result<(String, lumen::gc::Stats), String> {
-    let chunk = lumen::compile(src)?;
+fn run_with(src: &str, gc_stress: bool) -> Result<(String, jinso::gc::Stats), String> {
+    let chunk = jinso::compile(src)?;
     let mut out = Vec::new();
-    let stats = lumen::vm::run(&chunk, &mut out, gc_stress)?;
+    let stats = jinso::vm::run(&chunk, &mut out, gc_stress)?;
     Ok((String::from_utf8(out).unwrap(), stats))
 }
 
@@ -17,7 +17,7 @@ fn run(src: &str) -> Result<String, String> {
 }
 
 fn ast(expr: &str) -> String {
-    lumen::parse(&format!("print {expr};")).unwrap()[0].to_string()
+    jinso::parse(&format!("print {expr};")).unwrap()[0].to_string()
 }
 
 #[test]
@@ -185,7 +185,7 @@ fn reports_multiple_syntax_errors() {
 
 #[test]
 fn disassembler_shows_jump_targets() {
-    let chunk = lumen::compile("let i = 0;\nwhile i < 3 {\n  i = i + 1;\n}").unwrap();
+    let chunk = jinso::compile("let i = 0;\nwhile i < 3 {\n  i = i + 1;\n}").unwrap();
     let want = "\
 0000    1 Constant        0  (0)
 0003    | DefineGlobal    0  (i)
@@ -198,12 +198,12 @@ fn disassembler_shows_jump_targets() {
 0022    | SetGlobal       0  (i)
 0025    2 Loop           22  (-> 0006)
 ";
-    assert_eq!(lumen::disasm::disassemble(&chunk), want);
+    assert_eq!(jinso::disasm::disassemble(&chunk), want);
 }
 
 #[test]
 fn disassembler_marks_functions() {
-    let dis = lumen::disasm::disassemble(&lumen::compile(FIB).unwrap());
+    let dis = jinso::disasm::disassemble(&jinso::compile(FIB).unwrap());
     assert!(dis.contains("== fn fib =="), "{dis}");
     assert!(dis.contains("(<fn fib>)"), "{dis}");
     assert!(dis.contains("Call            1"), "{dis}");
@@ -344,7 +344,7 @@ fn array_syntax() {
     ] {
         assert_eq!(ast(src), format!("(print {want})"), "{src}");
     }
-    assert_eq!(lumen::parse("a[i + 1] = v;").unwrap()[0].to_string(), "(set-index a (+ i 1) v)");
+    assert_eq!(jinso::parse("a[i + 1] = v;").unwrap()[0].to_string(), "(set-index a (+ i 1) v)");
     for (src, want) in [
         ("print [1, 2;", "expected ']'"),
         ("print a[];", "expected expression, got ']'"),
@@ -469,7 +469,7 @@ fn closure_errors() {
 
 #[test]
 fn disassembler_shows_upvalues() {
-    let dis = lumen::disasm::disassemble(&lumen::compile(&format!("{COUNTER}print make_counter()();")).unwrap());
+    let dis = jinso::disasm::disassemble(&jinso::compile(&format!("{COUNTER}print make_counter()();")).unwrap());
     for want in ["== fn next ==", "GetUpvalue      0  (count)", "SetUpvalue      0  (count)", "Closure         1  (<fn next>)", "local 0 (count)"] {
         assert!(dis.contains(want), "missing {want:?} in:\n{dis}");
     }
@@ -507,15 +507,15 @@ fn compare_and_branch() {
 #[test]
 fn step_budget_stops_programs_that_never_end() {
     let limited = |src: &str| {
-        let chunk = lumen::compile(src).unwrap();
-        lumen::vm::run_limited(&chunk, &mut Vec::new(), false, 10_000).unwrap_err()
+        let chunk = jinso::compile(src).unwrap();
+        jinso::vm::run_limited(&chunk, &mut Vec::new(), false, 10_000).unwrap_err()
     };
     // an endless loop, and recursion whose call count is effectively unbounded (2^4096)
     assert!(limited("let i = 0;\nwhile true { i = i + 1; }").contains("line 2: step limit reached"));
     assert!(limited("fn f(n) { if n == 0 { return 0; } return f(n - 1) + f(n - 1); }\nprint f(4000);").contains("step limit reached"));
     // a program within budget runs normally
-    let chunk = lumen::compile("let i = 0; while i < 100 { i = i + 1; } print i;").unwrap();
+    let chunk = jinso::compile("let i = 0; while i < 100 { i = i + 1; } print i;").unwrap();
     let mut out = Vec::new();
-    lumen::vm::run_limited(&chunk, &mut out, false, 10_000).unwrap();
+    jinso::vm::run_limited(&chunk, &mut out, false, 10_000).unwrap();
     assert_eq!(out, b"100\n");
 }

@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Lumen Playground</title>
+<title>Jinso Playground</title>
 <meta name="description" content="A bytecode compiler and stack VM written in Rust, running in your browser via WebAssembly.">
 <style>
   :root {
@@ -66,7 +66,7 @@
 </head>
 <body>
 <header>
-  <h1>lumen</h1>
+  <h1>jinso</h1>
   <p>A bytecode compiler and stack-based VM written in Rust, running here as WebAssembly.</p>
   <a href="https://github.com/sakethchoppara/lumen-vm">Source on GitHub</a>
 </header>
@@ -81,7 +81,7 @@
 
 <main>
   <section class="pane">
-    <div class="pane-head"><span>program.lm</span></div>
+    <div class="pane-head"><span>program.jn</span></div>
     <div class="editor">
       <pre id="gutter" aria-hidden="true"></pre>
       <textarea id="src" spellcheck="false" autocapitalize="off" autocomplete="off" aria-label="Program source"></textarea>
@@ -135,7 +135,7 @@ while i < 3000 {
   let w = wrap(s);       // a fresh copy each iteration
   i = i + 1;
 }
-print wrap("lumen");
+print wrap("jinso");
 print s == s;
 `,
   'Closures': `// A closure keeps the variables it uses alive after
@@ -190,7 +190,7 @@ countdown(10);
 const $ = id => document.getElementById(id);
 const src = $('src'), gutter = $('gutter'), out = $('out'), status = $('status'), runBtn = $('run');
 const TIMEOUT_MS = 5000;
-// Unique per page load, so a cached worker.js can never pair with a newer lumen.wasm.
+// Unique per page load, so a cached worker.js can never pair with a newer jinso.wasm.
 const WORKER_URL = `worker.js?${Date.now()}`;
 let worker, timer, result = null, tab = 'output', renderQueued = false;
 

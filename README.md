@@ -1,4 +1,4 @@
-# Lumen
+# Jinso
 
 [![CI](https://github.com/sakethchoppara/lumen-vm/actions/workflows/ci.yml/badge.svg)](https://github.com/sakethchoppara/lumen-vm/actions/workflows/ci.yml)
 
@@ -27,10 +27,10 @@ print c();   // 2: count outlived the call that created it
 
 ```sh
 cargo build --release
-./target/release/lumen run examples/closures.lm          # run a program
-./target/release/lumen dis examples/closures.lm          # show its bytecode
-./target/release/lumen ast examples/arrays.lm            # show its syntax tree
-./target/release/lumen run --gc-stress examples/strings.lm   # collect garbage on every allocation
+./target/release/jinso run examples/closures.jn          # run a program
+./target/release/jinso dis examples/closures.jn          # show its bytecode
+./target/release/jinso ast examples/arrays.jn            # show its syntax tree
+./target/release/jinso run --gc-stress examples/strings.jn   # collect garbage on every allocation
 
 cargo test                          # ~190 cases, each run normally and under --gc-stress
 ./scripts/bench.sh                  # benchmark against CPython
@@ -63,7 +63,7 @@ Actions rebuilds it and deploys it to Pages on every push to `main`.
 | Scoping | top-level variables are globals; variables declared in a block or function are locals |
 | Comments | `// to end of line` |
 
-Lumen is dynamically typed with strict checks: `1 + true`, `if 1 { }` and `not 5` are
+Jinso is dynamically typed with strict checks: `1 + true`, `if 1 { }` and `not 5` are
 runtime errors, not silent conversions. Every error carries a source location and the VM
 never panics on user input:
 
@@ -91,13 +91,13 @@ source ──▶ lexer ──▶ tokens ──▶ parser ──▶ AST ──▶
 |---|---|
 | `lexer.rs` | Source to tokens with line and column |
 | `parser.rs` | Recursive descent for statements, precedence climbing for expressions, error recovery |
-| `ast.rs` | Syntax tree, printable as S-expressions (`lumen ast`) |
+| `ast.rs` | Syntax tree, printable as S-expressions (`jinso ast`) |
 | `compiler.rs` | AST to bytecode: resolves every name to a local slot, an upvalue or a global; backpatches jumps |
 | `chunk.rs` | Opcodes, the `Vec<u8>` bytecode, constant pool, line table, function and upvalue descriptors |
 | `vm.rs` | Decodes the bytecode once, then runs it: value stack, call frames, built-ins |
 | `gc.rs` | Heap of strings, arrays, closures and upvalues; mark-and-sweep with an explicit work stack |
 | `upvalues.rs` | The open upvalues, sorted by stack slot, and closing them |
-| `disasm.rs` | Bytecode listing (`lumen dis`) |
+| `disasm.rs` | Bytecode listing (`jinso dis`) |
 | `wasm.rs` | Exports for the browser playground |
 
 ### What `fib` compiles to
@@ -164,7 +164,7 @@ copying the value would break sharing:
 fn pair() { let v = 0; fn get() { return v; } fn set(x) { v = x; } return [get, set]; }
 ```
 
-`get` and `set` must see the *same* `v`, during the call and after it. Lumen does what Lua
+`get` and `set` must see the *same* `v`, during the call and after it. Jinso does what Lua
 does. Each captured variable gets one **upvalue** object, which every closure capturing that
 variable shares:
 
@@ -270,7 +270,7 @@ after every change to the heap rather than trusted from the first time.
 
 `./scripts/bench.sh`: best of 5 runs, AMD Ryzen 7 5800HS, Linux, release build.
 
-| Benchmark | lumen | CPython 3.13.5 | lumen vs CPython | lumen instructions |
+| Benchmark | jinso | CPython 3.13.5 | jinso vs CPython | jinso instructions |
 |---|---|---|---|---|
 | fib | 0.116s | 0.114s | 1.02x slower | 1147M |
 | loop | 0.476s | 0.609s | 1.28x faster | 5072M |
@@ -307,9 +307,9 @@ In wall-clock time against v1: fib 0.132s → 0.116s, loop 0.579s → 0.476s, st
 ### Strings
 
 Strings used to be the weak spot. `s = s + "x"` copied the whole string every time, which is
-O(n²): at 100,000 appends Lumen took 0.246 s to CPython's 0.018 s, 13.7x slower. CPython
+O(n²): at 100,000 appends Jinso took 0.246 s to CPython's 0.018 s, 13.7x slower. CPython
 avoids the copy by checking that the old string has no other references and resizing it in
-place. Lumen has no reference counts to check, so it does this instead:
+place. Jinso has no reference counts to check, so it does this instead:
 
 - A string value is a *view*, a buffer handle plus a length. Buffers only ever grow at the end.
 - `a + b` appends `b` to `a`'s buffer in place when `a` ends exactly where the buffer ends,

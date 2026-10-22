@@ -11,5 +11,5 @@ while i < 3000 {
   let w = wrap(s);       // a fresh copy each iteration
   i = i + 1;
 }
-print wrap("lumen");
+print wrap("jinso");
 print s == s;

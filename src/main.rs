@@ -1,6 +1,6 @@
 use std::process::exit;
 
-const USAGE: &str = "usage: lumen <run|dis|ast> [--gc-stress] <file.lm>";
+const USAGE: &str = "usage: jinso <run|dis|ast> [--gc-stress] <file.jn>";
 
 fn main() {
     let (flags, args): (Vec<String>, Vec<String>) = std::env::args().skip(1).partition(|a| a.starts_with("--"));
@@ -18,9 +18,9 @@ fn main() {
         exit(66);
     });
     let result = match cmd.as_str() {
-        "run" => lumen::compile(&src).and_then(|c| lumen::vm::run(&c, &mut std::io::stdout().lock(), gc_stress).map(|_| ())),
-        "dis" => lumen::compile(&src).map(|c| print!("{}", lumen::disasm::disassemble(&c))),
-        "ast" => lumen::parse(&src).map(|stmts| stmts.iter().for_each(|s| println!("{s}"))),
+        "run" => jinso::compile(&src).and_then(|c| jinso::vm::run(&c, &mut std::io::stdout().lock(), gc_stress).map(|_| ())),
+        "dis" => jinso::compile(&src).map(|c| print!("{}", jinso::disasm::disassemble(&c))),
+        "ast" => jinso::parse(&src).map(|stmts| stmts.iter().for_each(|s| println!("{s}"))),
         _ => {
             eprintln!("{USAGE}");
             exit(64);
