@@ -2,6 +2,8 @@
 
 [![CI](https://github.com/sakethchoppara/lumen-vm/actions/workflows/ci.yml/badge.svg)](https://github.com/sakethchoppara/lumen-vm/actions/workflows/ci.yml)
 
+**[Try it in your browser →](https://sakethchoppara.github.io/lumen-vm/)**
+
 A small scripting language implemented from scratch in Rust: a lexer, a recursive-descent
 parser, a compiler that emits bytecode, a stack-based virtual machine, and a mark-and-sweep
 garbage collector. No dependencies.
@@ -26,7 +28,18 @@ cargo build --release
 cargo test                          # 100+ cases, each run normally and under --gc-stress
 ./scripts/bench.sh                  # benchmark against CPython
 cargo run --example fuzz -- 600     # 10 minutes of random input
+
+./scripts/build-web.sh && python3 -m http.server -d web   # playground at localhost:8000
 ```
+
+## Playground
+
+`web/` is a static page that runs the same compiler and VM, built for
+`wasm32-unknown-unknown`, with Output, Bytecode and Syntax tree tabs. It uses no
+wasm-bindgen. `src/wasm.rs` exports three plain functions (`alloc`, `run`, `result_ptr`),
+and about 20 lines of JS copy the source in and the results out. The VM runs in a Web
+Worker, so a program that never ends is stopped after 5 seconds instead of freezing the
+tab. GitHub Actions rebuilds it and deploys it to Pages on every push to `main`.
 
 ## The language
 
@@ -71,6 +84,7 @@ source ──▶ lexer ──▶ tokens ──▶ parser ──▶ AST ──▶
 | `vm.rs` | Fetch-decode-execute loop, value stack, call frames |
 | `gc.rs` | String heap, mark-and-sweep collector |
 | `disasm.rs` | Bytecode listing (`lumen dis`) |
+| `wasm.rs` | Exports for the browser playground |
 
 ### What `fib` compiles to
 
@@ -177,5 +191,4 @@ appends in place. Lumen's collector doesn't track reference counts, so it can't 
 
 ## Not in v1
 
-Closures, arrays, structs, a REPL, string escapes, and a standard library. The
-WebAssembly playground is the next milestone.
+Closures, arrays, structs, a REPL, string escapes, and a standard library.

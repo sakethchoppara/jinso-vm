@@ -7,6 +7,8 @@ pub mod lexer;
 pub mod parser;
 pub mod value;
 pub mod vm;
+#[cfg(target_arch = "wasm32")]
+mod wasm;
 
 use std::io::Write;
 

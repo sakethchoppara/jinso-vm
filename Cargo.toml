@@ -3,4 +3,7 @@ name = "lumen"
 version = "0.1.0"
 edition = "2024"
 
+[lib]
+crate-type = ["rlib", "cdylib"] # cdylib produces lumen.wasm for the playground
+
 [dependencies]
