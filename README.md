@@ -1,8 +1,8 @@
 # Jinso
 
-[![CI](https://github.com/sakethchoppara/lumen-vm/actions/workflows/ci.yml/badge.svg)](https://github.com/sakethchoppara/lumen-vm/actions/workflows/ci.yml)
+[![CI](https://github.com/sakethchoppara/jinso-vm/actions/workflows/ci.yml/badge.svg)](https://github.com/sakethchoppara/jinso-vm/actions/workflows/ci.yml)
 
-**[Try it in your browser →](https://sakethchoppara.github.io/lumen-vm/)**
+**[Try it in your browser →](https://sakethchoppara.github.io/jinso-vm/)**
 
 A small scripting language implemented from scratch in Rust: a lexer, a recursive-descent
 parser, a compiler that emits bytecode, a stack-based virtual machine with closures and
