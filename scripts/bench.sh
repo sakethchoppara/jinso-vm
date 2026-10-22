@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Times jinso against CPython on bench/*.jn and prints a Markdown table.
+# Times jinso against CPython on bench/*.jo and prints a Markdown table.
 # Usage: ./scripts/bench.sh [runs]    (reports the best of N runs, default 5)
 #
 # Wall-clock time moves by about ±5% between builds from code layout alone. When `perf`
@@ -29,7 +29,7 @@ instructions() {
 }
 
 has_perf=""
-if command -v perf > /dev/null && [[ -n "$(instructions bench/fib.jn 2> /dev/null || true)" ]]; then
+if command -v perf > /dev/null && [[ -n "$(instructions bench/fib.jo 2> /dev/null || true)" ]]; then
   has_perf=1
 else
   echo "perf can't count instructions here; showing wall-clock time only" >&2
@@ -43,8 +43,8 @@ rule="|---|---"
 echo "$header |"
 echo "$rule|"
 
-for lm in bench/*.jn; do
-  name=$(basename "$lm" .jn)
+for lm in bench/*.jo; do
+  name=$(basename "$lm" .jo)
   t_jinso=$(best "$jinso" run "$lm")
   row="| $name | ${t_jinso}s"
   if [[ -n $py ]]; then

@@ -4,10 +4,10 @@
 
 ```sh
 CARGO_PROFILE_RELEASE_DEBUG=line-tables-only cargo build --release --target-dir /tmp/prof
-perf record -o fib.data /tmp/prof/release/jinso run bench/fib.jn
+perf record -o fib.data /tmp/prof/release/jinso run bench/fib.jo
 perf report -i fib.data --no-children --sort symbol    # by function
 perf report -i fib.data --no-children --sort srcline   # by source line
-perf stat -e instructions ./target/release/jinso run bench/fib.jn   # noise-free count
+perf stat -e instructions ./target/release/jinso run bench/fib.jo   # noise-free count
 ```
 
 Line tables are only for profiling builds; the shipped release profile is unchanged.

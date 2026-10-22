@@ -1,6 +1,6 @@
 use std::process::exit;
 
-const USAGE: &str = "usage: jinso <run|dis|ast> [--gc-stress] <file.jn>";
+const USAGE: &str = "usage: jinso <run|dis|ast> [--gc-stress] <file.jo>";
 
 fn main() {
     let (flags, args): (Vec<String>, Vec<String>) = std::env::args().skip(1).partition(|a| a.starts_with("--"));

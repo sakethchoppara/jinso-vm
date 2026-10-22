@@ -27,10 +27,10 @@ print c();   // 2: count outlived the call that created it
 
 ```sh
 cargo build --release
-./target/release/jinso run examples/closures.jn          # run a program
-./target/release/jinso dis examples/closures.jn          # show its bytecode
-./target/release/jinso ast examples/arrays.jn            # show its syntax tree
-./target/release/jinso run --gc-stress examples/strings.jn   # collect garbage on every allocation
+./target/release/jinso run examples/closures.jo          # run a program
+./target/release/jinso dis examples/closures.jo          # show its bytecode
+./target/release/jinso ast examples/arrays.jo            # show its syntax tree
+./target/release/jinso run --gc-stress examples/strings.jo   # collect garbage on every allocation
 
 cargo test                          # ~190 cases, each run normally and under --gc-stress
 ./scripts/bench.sh                  # benchmark against CPython

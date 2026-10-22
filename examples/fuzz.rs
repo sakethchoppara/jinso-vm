@@ -2,7 +2,7 @@
 //!
 //! Generates token soup and mutated versions of the example programs, then pushes each
 //! through lex, parse, compile, disassemble and (half the time under --gc-stress) the VM.
-//! Any panic is a bug: the input is saved to fuzz-crash.jn and the run fails.
+//! Any panic is a bug: the input is saved to fuzz-crash.jo and the run fails.
 //! Runs in the dev profile on purpose, so debug assertions and overflow checks are on.
 
 use std::panic;
@@ -44,10 +44,10 @@ fn main() {
         .iter()
         .flat_map(|dir| std::fs::read_dir(dir).unwrap())
         .map(|e| e.unwrap().path())
-        .filter(|p| p.extension().is_some_and(|e| e == "jn"))
+        .filter(|p| p.extension().is_some_and(|e| e == "jo"))
         .map(|p| std::fs::read_to_string(p).unwrap())
         .collect();
-    assert!(!corpus.is_empty(), "no .jn programs found in examples/ or bench/; run from the repo root");
+    assert!(!corpus.is_empty(), "no .jo programs found in examples/ or bench/; run from the repo root");
 
     let deadline = Instant::now() + Duration::from_secs(secs);
     let mut runs = 0u64;
@@ -55,8 +55,8 @@ fn main() {
         let src = if rng.below(2) == 0 { soup(&mut rng) } else { mutate(&mut rng, &corpus) };
         let stress = rng.below(2) == 0;
         if panic::catch_unwind(|| check(&src, stress)).is_err() {
-            std::fs::write("fuzz-crash.jn", &src).unwrap();
-            eprintln!("panic (gc_stress={stress}) on input saved to fuzz-crash.jn (seed {seed}):\n{src}");
+            std::fs::write("fuzz-crash.jo", &src).unwrap();
+            eprintln!("panic (gc_stress={stress}) on input saved to fuzz-crash.jo (seed {seed}):\n{src}");
             std::process::exit(1);
         }
         runs += 1;
