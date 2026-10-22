@@ -3,15 +3,20 @@ use crate::lexer::{Tok, Token};
 
 /// Parses the whole program, collecting every syntax error instead of stopping at the first.
 pub fn parse(toks: Vec<Token>) -> Result<Vec<Stmt>, Vec<String>> {
-    let mut p = Parser { toks, pos: 0, errors: Vec::new() };
+    let mut p = Parser { toks, pos: 0, errors: Vec::new(), depth: 0 };
     let stmts = p.stmts_until(Tok::Eof);
     if p.errors.is_empty() { Ok(stmts) } else { Err(p.errors) }
 }
+
+/// Bounds AST depth, so recursion in the parser, compiler and AST drop can't overflow
+/// the Rust stack on input like `((((...` or `1+1+...+1`.
+const MAX_DEPTH: usize = 128;
 
 struct Parser {
     toks: Vec<Token>,
     pos: usize,
     errors: Vec<String>,
+    depth: usize,
 }
 
 /// Infix operators: (binding power, op). Higher binds tighter.
@@ -53,7 +58,7 @@ impl Parser {
 
     fn error(&self, msg: &str) -> String {
         let t = &self.toks[self.pos];
-        format!("{}:{}: {msg}, got {:?}", t.line, t.col, t.tok)
+        format!("{}:{}: {msg}, got {}", t.line, t.col, t.tok)
     }
 
     fn expect(&mut self, want: Tok, what: &str) -> Result<(), String> {
@@ -113,6 +118,17 @@ impl Parser {
         }
     }
 
+    /// Runs `f` one nesting level deeper; the depth is restored even when `f` fails.
+    fn nested<T>(&mut self, f: impl FnOnce(&mut Self) -> Result<T, String>) -> Result<T, String> {
+        if self.depth >= MAX_DEPTH {
+            return Err(self.error(&format!("nesting too deep (max {MAX_DEPTH})")));
+        }
+        self.depth += 1;
+        let r = f(self);
+        self.depth -= 1;
+        r
+    }
+
     fn block(&mut self) -> Result<Vec<Stmt>, String> {
         self.expect(Tok::LBrace, "'{'")?;
         let stmts = self.stmts_until(Tok::RBrace);
@@ -121,6 +137,10 @@ impl Parser {
     }
 
     fn stmt(&mut self) -> Result<Stmt, String> {
+        self.nested(Self::stmt_inner)
+    }
+
+    fn stmt_inner(&mut self) -> Result<Stmt, String> {
         let line = self.line();
         let s = match self.peek() {
             Tok::If => {
@@ -187,6 +207,10 @@ impl Parser {
 
     /// After `if`: cond block [else (block | if ...)]
     fn if_rest(&mut self, line: u32) -> Result<Stmt, String> {
+        self.nested(|p| p.if_rest_inner(line))
+    }
+
+    fn if_rest_inner(&mut self, line: u32) -> Result<Stmt, String> {
         let cond = self.expr(1)?;
         let then = self.block()?;
         let els = if *self.peek() != Tok::Else {
@@ -207,11 +231,23 @@ impl Parser {
     /// Precedence climbing: only consume operators binding at least as tightly as `min`.
     /// Recursing with `p + 1` makes same-precedence operators left-associative.
     fn expr(&mut self, min: u8) -> Result<Expr, String> {
+        let saved = self.depth;
+        let r = self.expr_inner(min);
+        self.depth = saved;
+        r
+    }
+
+    /// Each operator in a chain like `1+1+1` deepens the (left-leaning) tree, so it counts as nesting.
+    fn expr_inner(&mut self, min: u8) -> Result<Expr, String> {
         let mut lhs = self.unary()?;
         while let Some((p, op)) = infix(self.peek()) {
             if p < min {
                 break;
             }
+            if self.depth >= MAX_DEPTH {
+                return Err(self.error(&format!("nesting too deep (max {MAX_DEPTH})")));
+            }
+            self.depth += 1;
             let line = self.line();
             self.advance();
             let rhs = self.expr(p + 1)?;
@@ -221,6 +257,10 @@ impl Parser {
     }
 
     fn unary(&mut self) -> Result<Expr, String> {
+        self.nested(Self::unary_inner)
+    }
+
+    fn unary_inner(&mut self) -> Result<Expr, String> {
         let line = self.line();
         let kind = match self.peek() {
             Tok::Minus => {

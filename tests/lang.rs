@@ -150,7 +150,7 @@ fn syntax_errors() {
         ("print \"oops", "1:7: unterminated string"),
         ("print 99999999999999999999;", "too large"),
         ("print @;", "1:7: unexpected character '@'"),
-        ("if true { print 1 }", "expected ';', got RBrace"),
+        ("if true { print 1 }", "expected ';', got '}'"),
         ("while true print 1;", "expected '{'"),
         ("if true { print 1; ", "expected '}'"),
         ("return 1;", "line 1: return outside function"),
@@ -158,6 +158,10 @@ fn syntax_errors() {
         ("fn f(a, a) { }", "duplicate parameter 'a'"),
         ("fn f(a b) { }", "expected ')'"),
         ("print f(1,);", "expected expression"),
+        ("print 1 +;", "expected expression, got ';'"),
+        ("let x = 1 let", "expected ';', got 'let'"),
+        ("print", "expected expression, got end of file"),
+        ("print x y;", "expected ';', got identifier 'y'"),
     ] {
         let err = run(src).unwrap_err();
         assert!(err.contains(want), "{src}: got {err:?}");
@@ -183,14 +187,12 @@ fn disassembler_shows_jump_targets() {
 0006    2 GetGlobal       0  (i)
 0009    | Constant        1  (3)
 0012    | Lt           
-0013    | JumpIfFalse    14  (-> 0030)
-0016    | Pop          
-0017    3 GetGlobal       0  (i)
-0020    | Constant        2  (1)
-0023    | Add          
-0024    | SetGlobal       0  (i)
-0027    2 Loop           24  (-> 0006)
-0030    | Pop          
+0013    | JumpIfFalse    13  (-> 0029)
+0016    3 GetGlobal       0  (i)
+0019    | Constant        2  (1)
+0022    | Add          
+0023    | SetGlobal       0  (i)
+0026    2 Loop           23  (-> 0006)
 ";
     assert_eq!(lumen::disasm::disassemble(&chunk), want);
 }
@@ -224,4 +226,22 @@ fn gc_stress_collects_on_every_allocation() {
     assert_eq!(stats.collections, 3000, "{stats:?}");
     // After the final collection only the 3 literals and s survive; then one more alloc.
     assert!(stats.live <= 5, "{stats:?}");
+}
+
+#[test]
+fn deep_nesting_is_an_error_not_a_crash() {
+    for src in [
+        format!("print {}1{};", "(".repeat(100_000), ")".repeat(100_000)),
+        format!("print {}1;", "-".repeat(100_000)),
+        format!("print {}true;", "not ".repeat(100_000)),
+        format!("print 1{};", " + 1".repeat(100_000)),
+        format!("{}{}", "if true { ".repeat(100_000), "}".repeat(100_000)),
+        format!("if false {{ }}{} {{ }}", " else if false { }".repeat(100_000)),
+    ] {
+        let err = run(&src).unwrap_err();
+        assert!(err.contains("nesting too deep"), "{}", &err[..err.len().min(200)]);
+    }
+    // just under the limit still works
+    assert_eq!(run(&format!("print {}1{};", "(".repeat(100), ")".repeat(100))).unwrap(), "1\n");
+    assert_eq!(run(&format!("print 0{};", " + 1".repeat(100))).unwrap(), "100\n");
 }

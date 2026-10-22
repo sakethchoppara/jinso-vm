@@ -21,7 +21,7 @@ opcodes! {
     GetLocal,     // u16 stack slot
     SetLocal,     // u16 stack slot
     Jump,         // u16 forward offset
-    JumpIfFalse,  // u16 forward offset; peeks the condition, doesn't pop it
+    JumpIfFalse,  // u16 forward offset; pops the condition, which must be a bool
     Loop,         // u16 backward offset
     Pop,
     Call,         // u16 argument count; callee and args are on the stack

@@ -39,6 +39,49 @@ pub enum Tok {
     Eof,
 }
 
+impl std::fmt::Display for Tok {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        let s = match self {
+            Tok::Int(n) => return write!(f, "{n}"),
+            Tok::Str(s) => return write!(f, "{s:?}"),
+            Tok::Ident(name) => return write!(f, "identifier '{name}'"),
+            Tok::Eof => return write!(f, "end of file"),
+            Tok::Let => "let",
+            Tok::Fn => "fn",
+            Tok::Return => "return",
+            Tok::If => "if",
+            Tok::Else => "else",
+            Tok::While => "while",
+            Tok::Print => "print",
+            Tok::True => "true",
+            Tok::False => "false",
+            Tok::Nil => "nil",
+            Tok::And => "and",
+            Tok::Or => "or",
+            Tok::Not => "not",
+            Tok::Plus => "+",
+            Tok::Minus => "-",
+            Tok::Star => "*",
+            Tok::Slash => "/",
+            Tok::Percent => "%",
+            Tok::LParen => "(",
+            Tok::RParen => ")",
+            Tok::LBrace => "{",
+            Tok::RBrace => "}",
+            Tok::Comma => ",",
+            Tok::Semi => ";",
+            Tok::Eq => "=",
+            Tok::EqEq => "==",
+            Tok::BangEq => "!=",
+            Tok::Lt => "<",
+            Tok::Le => "<=",
+            Tok::Gt => ">",
+            Tok::Ge => ">=",
+        };
+        write!(f, "'{s}'")
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Token {
     pub tok: Tok,

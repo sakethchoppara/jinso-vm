@@ -33,6 +33,21 @@ pub fn run(chunk: &Chunk, out: &mut impl Write, gc_stress: bool) -> Result<Stats
         let arg = || chunk.read_u16(at + 1) as usize;
         let err = |msg: String| format!("line {}: {msg}", chunk.lines[at]);
 
+        // Int binary op computed in place: the result overwrites the left operand.
+        macro_rules! int_op {
+            ($f:expr) => {{
+                let n = stack.len();
+                let (a, b) = (stack[n - 2], stack[n - 1]);
+                let (Value::Int(x), Value::Int(y)) = (a, b) else {
+                    let want = if op == Op::Add { "two ints or two strs" } else { "ints" };
+                    return Err(err(format!("operands must be {want}, got {} and {}", a.type_name(), b.type_name())));
+                };
+                let f: fn(i64, i64) -> Result<Value, &'static str> = $f;
+                stack[n - 2] = f(x, y).map_err(|m| err(m.into()))?;
+                stack.pop();
+            }};
+        }
+
         match op {
             Op::Constant => stack.push(chunk.constants[arg()]),
             Op::GetGlobal => match globals[arg()] {
@@ -50,7 +65,7 @@ pub fn run(chunk: &Chunk, out: &mut impl Write, gc_stress: bool) -> Result<Stats
             Op::SetLocal => stack[base + arg()] = stack.pop().unwrap(),
             Op::Jump => ip += arg(),
             Op::Loop => ip -= arg(),
-            Op::JumpIfFalse => match stack.last().unwrap() {
+            Op::JumpIfFalse => match stack.pop().unwrap() {
                 Value::Bool(true) => {}
                 Value::Bool(false) => ip += arg(),
                 v => return Err(err(format!("condition must be a bool, got {}", v.type_name()))),
@@ -97,26 +112,19 @@ pub fn run(chunk: &Chunk, out: &mut impl Write, gc_stress: bool) -> Result<Stats
                 }
                 stack.push(heap.alloc(s));
             }
-            Op::Add | Op::Sub | Op::Mul | Op::Div | Op::Mod | Op::Lt | Op::Gt => {
-                let b = stack.pop().unwrap();
-                let a = stack.pop().unwrap();
-                let (Value::Int(x), Value::Int(y)) = (a, b) else {
-                    let want = if op == Op::Add { "two ints or two strs" } else { "ints" };
-                    return Err(err(format!("operands must be {want}, got {} and {}", a.type_name(), b.type_name())));
-                };
-                let result = match op {
-                    Op::Add => x.checked_add(y).map(Value::Int),
-                    Op::Sub => x.checked_sub(y).map(Value::Int),
-                    Op::Mul => x.checked_mul(y).map(Value::Int),
-                    Op::Div | Op::Mod if y == 0 => return Err(err("division by zero".into())),
-                    Op::Div => x.checked_div(y).map(Value::Int),
-                    Op::Mod => x.checked_rem(y).map(Value::Int),
-                    Op::Lt => Some(Value::Bool(x < y)),
-                    Op::Gt => Some(Value::Bool(x > y)),
-                    _ => unreachable!(),
-                };
-                stack.push(result.ok_or_else(|| err("integer overflow".into()))?);
-            }
+            Op::Add => int_op!(|x, y| x.checked_add(y).map(Value::Int).ok_or("integer overflow")),
+            Op::Sub => int_op!(|x, y| x.checked_sub(y).map(Value::Int).ok_or("integer overflow")),
+            Op::Mul => int_op!(|x, y| x.checked_mul(y).map(Value::Int).ok_or("integer overflow")),
+            Op::Div => int_op!(|x, y| match y {
+                0 => Err("division by zero"),
+                _ => x.checked_div(y).map(Value::Int).ok_or("integer overflow"),
+            }),
+            Op::Mod => int_op!(|x, y| match y {
+                0 => Err("division by zero"),
+                _ => x.checked_rem(y).map(Value::Int).ok_or("integer overflow"),
+            }),
+            Op::Lt => int_op!(|x, y| Ok(Value::Bool(x < y))),
+            Op::Gt => int_op!(|x, y| Ok(Value::Bool(x > y))),
             Op::Neg => match stack.pop().unwrap() {
                 Value::Int(n) => stack.push(Value::Int(n.checked_neg().ok_or_else(|| err("integer overflow".into()))?)),
                 v => return Err(err(format!("operand of '-' must be an int, got {}", v.type_name()))),

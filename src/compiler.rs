@@ -136,28 +136,28 @@ impl Compiler {
                 self.expr(e)?;
                 self.chunk.emit(Op::Pop, e.line);
             }
-            // cond; JumpIfFalse else; Pop; then; Jump end; else: Pop; els; end:
+            // cond; JumpIfFalse else; then; [Jump end; else: els;] end:
             Stmt::If { cond, then, els, line } => {
                 self.expr(cond)?;
                 let to_else = self.chunk.emit_jump(Op::JumpIfFalse, cond.line);
-                self.chunk.emit(Op::Pop, *line);
                 self.block(then, *line)?;
-                let to_end = self.chunk.emit_jump(Op::Jump, *line);
-                self.chunk.patch_jump(to_else)?;
-                self.chunk.emit(Op::Pop, *line);
-                self.block(els, *line)?;
-                self.chunk.patch_jump(to_end)?;
+                if els.is_empty() {
+                    self.chunk.patch_jump(to_else)?;
+                } else {
+                    let to_end = self.chunk.emit_jump(Op::Jump, *line);
+                    self.chunk.patch_jump(to_else)?;
+                    self.block(els, *line)?;
+                    self.chunk.patch_jump(to_end)?;
+                }
             }
-            // start: cond; JumpIfFalse exit; Pop; body; Loop start; exit: Pop
+            // start: cond; JumpIfFalse exit; body; Loop start; exit:
             Stmt::While { cond, body, line } => {
                 let start = self.chunk.code.len();
                 self.expr(cond)?;
                 let to_exit = self.chunk.emit_jump(Op::JumpIfFalse, cond.line);
-                self.chunk.emit(Op::Pop, *line);
                 self.block(body, *line)?;
                 self.chunk.emit_loop(start, *line)?;
                 self.chunk.patch_jump(to_exit)?;
-                self.chunk.emit(Op::Pop, *line);
             }
         }
         Ok(())
@@ -189,23 +189,25 @@ impl Compiler {
                 self.expr(inner)?;
                 self.chunk.emit(if *op == UnOp::Neg { Op::Neg } else { Op::Not }, line);
             }
-            // Short-circuit: if l is false, it's the result and r never runs.
-            // l; JumpIfFalse end; Pop; r; end:
+            // Short-circuit: r runs only if it decides the result. JumpIfFalse has already
+            // checked that l is a bool, so when l decides, the result is a known constant.
+            // l; JumpIfFalse short; r; Jump end; short: false; end:
             ExprKind::Binary(BinOp::And, l, r) => {
                 self.expr(l)?;
-                let to_end = self.chunk.emit_jump(Op::JumpIfFalse, line);
-                self.chunk.emit(Op::Pop, line);
+                let to_short = self.chunk.emit_jump(Op::JumpIfFalse, line);
                 self.expr(r)?;
+                let to_end = self.chunk.emit_jump(Op::Jump, line);
+                self.chunk.patch_jump(to_short)?;
+                self.constant(Value::Bool(false), line)?;
                 self.chunk.patch_jump(to_end)?;
             }
-            // If l is true, it's the result. No JumpIfTrue opcode, so hop over an unconditional jump.
-            // l; JumpIfFalse rhs; Jump end; rhs: Pop; r; end:
+            // l; JumpIfFalse rhs; true; Jump end; rhs: r; end:
             ExprKind::Binary(BinOp::Or, l, r) => {
                 self.expr(l)?;
                 let to_rhs = self.chunk.emit_jump(Op::JumpIfFalse, line);
+                self.constant(Value::Bool(true), line)?;
                 let to_end = self.chunk.emit_jump(Op::Jump, line);
                 self.chunk.patch_jump(to_rhs)?;
-                self.chunk.emit(Op::Pop, line);
                 self.expr(r)?;
                 self.chunk.patch_jump(to_end)?;
             }

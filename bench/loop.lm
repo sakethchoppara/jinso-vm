@@ -1,0 +1,10 @@
+fn main() {
+  let i = 0;
+  let sum = 0;
+  while i < 10000000 {
+    sum = sum + i % 7;
+    i = i + 1;
+  }
+  print sum;
+}
+main();
