@@ -1,0 +1,12 @@
+// week 5: strings live on the GC heap. Try: lumen run --gc-stress examples/strings.lm
+fn repeat(s, n) {
+  let out = "";
+  while n > 0 { out = out + s; n = n - 1; }
+  return out;
+}
+
+let line = repeat("=", 20);
+print line;
+print "lumen" + " " + "vm";
+print repeat("ab", 3) == "ababab";
+print line;

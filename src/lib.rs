@@ -2,6 +2,7 @@ pub mod ast;
 pub mod chunk;
 pub mod compiler;
 pub mod disasm;
+pub mod gc;
 pub mod lexer;
 pub mod parser;
 pub mod value;
@@ -19,5 +20,5 @@ pub fn compile(src: &str) -> Result<chunk::Chunk, String> {
 }
 
 pub fn run(src: &str, out: &mut impl Write) -> Result<(), String> {
-    vm::run(&compile(src)?, out)
+    vm::run(&compile(src)?, out, false).map(|_| ())
 }

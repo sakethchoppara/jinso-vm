@@ -6,7 +6,8 @@ pub enum Value {
     Nil,
     Bool(bool),
     Int(i64),
-    Fn(u16), // index into Chunk::functions
+    Fn(u16),  // index into Chunk::functions
+    Str(u32), // heap handle; compare contents via the heap, not with ==
 }
 
 impl Value {
@@ -16,6 +17,7 @@ impl Value {
             Value::Bool(_) => "bool",
             Value::Int(_) => "int",
             Value::Fn(_) => "fn",
+            Value::Str(_) => "str",
         }
     }
 }
@@ -27,6 +29,7 @@ impl fmt::Display for Value {
             Value::Bool(b) => write!(f, "{b}"),
             Value::Int(n) => write!(f, "{n}"),
             Value::Fn(i) => write!(f, "<fn #{i}>"), // Chunk::show prints the name
+            Value::Str(h) => write!(f, "<str #{h}>"), // contents live in the heap
         }
     }
 }

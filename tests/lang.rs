@@ -1,9 +1,19 @@
 const FIB: &str = "fn fib(n) {\n  if n < 2 { return n; }\n  return fib(n - 1) + fib(n - 2);\n}\nprint fib(20);";
 
-fn run(src: &str) -> Result<String, String> {
+fn run_with(src: &str, gc_stress: bool) -> Result<(String, lumen::gc::Stats), String> {
+    let chunk = lumen::compile(src)?;
     let mut out = Vec::new();
-    lumen::run(src, &mut out)?;
-    Ok(String::from_utf8(out).unwrap())
+    let stats = lumen::vm::run(&chunk, &mut out, gc_stress)?;
+    Ok((String::from_utf8(out).unwrap(), stats))
+}
+
+/// Runs every program twice, normally and with a collection before every allocation;
+/// both must agree. A missing GC root shows up as a "dangling handle" panic under stress.
+fn run(src: &str) -> Result<String, String> {
+    let normal = run_with(src, false).map(|(out, _)| out);
+    let stressed = run_with(src, true).map(|(out, _)| out);
+    assert_eq!(normal, stressed, "--gc-stress changed the result of {src:?}");
+    normal
 }
 
 fn ast(expr: &str) -> String {
@@ -78,6 +88,23 @@ fn programs() {
         // calls from inside a top-level block: frame base must sit above the block's locals
         ("fn sq(n) { return n * n; } if true { let a = 3; let b = sq(a) + a; print b; }", "12\n"),
         ("fn sum(n) { if n == 0 { return 0; } return n + sum(n - 1); } print sum(3000);", "4501500\n"),
+        // strings
+        ("print \"hello\";", "hello\n"),
+        ("let a = \"foo\"; let b = a + \"bar\"; print b; print a;", "foobar\nfoo\n"),
+        ("print \"ab\" == \"a\" + \"b\"; print \"a\" != \"b\"; print \"1\" == 1;", "true\ntrue\nfalse\n"),
+        ("let s = \"\"; let i = 0; while i < 5 { s = s + \"ab\"; i = i + 1; } print s;", "ababababab\n"),
+        // GC roots: strings held in a global, in a caller's locals, in arguments and in
+        // block locals must all survive collections triggered deeper in the call stack.
+        ("fn join(a, b) { let sep = \"-\"; return a + sep + b; }
+          fn twice(s) { let t = join(s, s); return join(t, t); }
+          let g = \"x\" + \"y\";
+          if true { let local = twice(g); print local; print g; }", "xy-xy-xy-xy\nxy\n"),
+        // g is reachable only through the globals table while h is allocated
+        ("let g = \"a\" + \"b\"; let h = \"c\" + \"d\"; print g + h;", "abcd\n"),
+        // same, but a block local reachable only through the stack
+        ("if true { let l = \"a\" + \"b\"; let m = \"c\" + \"d\"; print l + m; }", "abcd\n"),
+        ("fn f(n) { if n == 0 { return \"\"; } let mine = \"<\" + \">\"; return mine + f(n - 1) + mine; } print f(3);",
+         "<><><><><><>\n"),
     ] {
         assert_eq!(run(src).as_deref(), Ok(want), "{src}");
     }
@@ -88,7 +115,7 @@ fn runtime_errors() {
     for (src, want) in [
         ("print 1 / 0;", "line 1: division by zero"),
         ("print 1 % 0;", "line 1: division by zero"),
-        ("print 1 + true;", "line 1: operands must be ints, got int and bool"),
+        ("print 1 + true;", "line 1: operands must be two ints or two strs, got int and bool"),
         ("print 1 < nil;", "operands must be ints"),
         ("print -true;", "operand of '-' must be an int"),
         ("print not 1;", "operand of 'not' must be a bool"),
@@ -105,6 +132,9 @@ fn runtime_errors() {
         ("let x = 1; x();", "can only call functions, got int"),
         ("fn f() { return 1 / 0; }\n\nf();", "line 1: division by zero"),
         ("fn f() { return g(); }\nf();", "undefined variable 'g'"),
+        ("print \"a\" + 1;", "operands must be two ints or two strs, got str and int"),
+        ("print \"a\" - \"b\";", "operands must be ints, got str and str"),
+        ("print \"a\" < \"b\";", "operands must be ints"),
     ] {
         let err = run(src).unwrap_err();
         assert!(err.contains(want), "{src}: got {err:?}");
@@ -171,4 +201,27 @@ fn disassembler_marks_functions() {
     assert!(dis.contains("== fn fib =="), "{dis}");
     assert!(dis.contains("(<fn fib>)"), "{dis}");
     assert!(dis.contains("Call            1"), "{dis}");
+}
+
+const GARBAGE_LOOP: &str = "let s = \"\"; let i = 0;
+while i < 3000 { s = s + \"x\"; i = i + 1; }
+print s == s;";
+
+#[test]
+fn gc_frees_unreachable_strings() {
+    // ~4.5MB of intermediate strings, each unreachable once s moves on.
+    let (out, stats) = run_with(GARBAGE_LOOP, false).unwrap();
+    assert_eq!(out, "true\n");
+    assert!(stats.collections >= 1, "{stats:?}");
+    assert!(stats.freed > 1000, "{stats:?}");
+    // Survivors: the literals, s, and at most the garbage made since the last collection.
+    assert!(stats.live < 3000, "{stats:?}");
+}
+
+#[test]
+fn gc_stress_collects_on_every_allocation() {
+    let (_, stats) = run_with(GARBAGE_LOOP, true).unwrap();
+    assert_eq!(stats.collections, 3000, "{stats:?}");
+    // After the final collection only the 3 literals and s survive; then one more alloc.
+    assert!(stats.live <= 5, "{stats:?}");
 }

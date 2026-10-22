@@ -74,6 +74,8 @@ pub struct Chunk {
     pub constants: Vec<Value>,
     pub global_names: Vec<String>,
     pub functions: Vec<FnInfo>,
+    /// String literals; the VM seeds its heap with these so `Value::Str(i)` constants are valid.
+    pub strings: Vec<String>,
 }
 
 impl Chunk {
@@ -109,10 +111,11 @@ impl Chunk {
         Ok(())
     }
 
-    /// Like Display, but functions print with their name.
+    /// Like Display, but resolves function names and string literals (not runtime strings).
     pub fn show(&self, v: Value) -> String {
         match v {
             Value::Fn(i) => format!("<fn {}>", self.functions[i as usize].name),
+            Value::Str(i) => format!("{:?}", self.strings[i as usize]),
             v => v.to_string(),
         }
     }

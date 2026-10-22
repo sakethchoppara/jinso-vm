@@ -1,4 +1,5 @@
 use crate::chunk::{Chunk, Op};
+use crate::gc::{Heap, Stats};
 use crate::value::Value;
 use std::io::Write;
 
@@ -13,7 +14,11 @@ struct Frame {
 /// Fetch-decode-execute loop. User errors come back as `Err("line N: ...")`; the VM
 /// never panics on a user program. The `unwrap`s on pop are compiler invariants
 /// (every pop has a matching push), so hitting one is a compiler bug.
-pub fn run(chunk: &Chunk, out: &mut impl Write) -> Result<(), String> {
+///
+/// GC roots are the value stack (which also holds every frame's arguments and locals,
+/// since frames only store ip and base), the globals, and the constant pool.
+pub fn run(chunk: &Chunk, out: &mut impl Write, gc_stress: bool) -> Result<Stats, String> {
+    let mut heap = Heap::new(&chunk.strings, gc_stress);
     let mut stack: Vec<Value> = Vec::with_capacity(256);
     let mut globals: Vec<Option<Value>> = vec![None; chunk.global_names.len()];
     let mut frames: Vec<Frame> = Vec::new();
@@ -81,11 +86,23 @@ pub fn run(chunk: &Chunk, out: &mut impl Write) -> Result<(), String> {
                 ip = frame.return_ip;
                 base = frame.base;
             }
+            Op::Add if matches!(stack[stack.len() - 2..], [Value::Str(_), Value::Str(_)]) => {
+                let Some(Value::Str(b)) = stack.pop() else { unreachable!() };
+                let Some(Value::Str(a)) = stack.pop() else { unreachable!() };
+                // Build the result as a plain String first: a and b are already off the stack
+                // (no longer roots), so they must be copied before a collection can free them.
+                let s = [heap.get(a), heap.get(b)].concat();
+                if heap.should_collect() {
+                    heap.collect(stack.iter().chain(globals.iter().flatten()).chain(&chunk.constants).copied());
+                }
+                stack.push(heap.alloc(s));
+            }
             Op::Add | Op::Sub | Op::Mul | Op::Div | Op::Mod | Op::Lt | Op::Gt => {
                 let b = stack.pop().unwrap();
                 let a = stack.pop().unwrap();
                 let (Value::Int(x), Value::Int(y)) = (a, b) else {
-                    return Err(err(format!("operands must be ints, got {} and {}", a.type_name(), b.type_name())));
+                    let want = if op == Op::Add { "two ints or two strs" } else { "ints" };
+                    return Err(err(format!("operands must be {want}, got {} and {}", a.type_name(), b.type_name())));
                 };
                 let result = match op {
                     Op::Add => x.checked_add(y).map(Value::Int),
@@ -111,11 +128,19 @@ pub fn run(chunk: &Chunk, out: &mut impl Write) -> Result<(), String> {
             Op::Eq => {
                 let b = stack.pop().unwrap();
                 let a = stack.pop().unwrap();
-                stack.push(Value::Bool(a == b));
+                let eq = match (a, b) {
+                    (Value::Str(x), Value::Str(y)) => heap.get(x) == heap.get(y),
+                    _ => a == b,
+                };
+                stack.push(Value::Bool(eq));
             }
-            Op::Print => writeln!(out, "{}", chunk.show(stack.pop().unwrap())).map_err(|e| e.to_string())?,
+            Op::Print => match stack.pop().unwrap() {
+                Value::Str(h) => writeln!(out, "{}", heap.get(h)),
+                v => writeln!(out, "{}", chunk.show(v)),
+            }
+            .map_err(|e| e.to_string())?,
         }
     }
     debug_assert!(stack.is_empty(), "compiler left values on the stack: {stack:?}");
-    Ok(())
+    Ok(heap.stats())
 }

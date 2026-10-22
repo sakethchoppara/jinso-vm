@@ -262,6 +262,10 @@ impl Parser {
                 self.advance();
                 ExprKind::Nil
             }
+            Tok::Str(_) => match self.advance() {
+                Tok::Str(s) => ExprKind::Str(s),
+                _ => unreachable!(),
+            },
             Tok::Ident(_) => ExprKind::Var(self.ident()?),
             Tok::LParen => {
                 self.advance();

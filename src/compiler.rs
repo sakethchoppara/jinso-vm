@@ -169,6 +169,11 @@ impl Compiler {
             ExprKind::Int(n) => self.constant(Value::Int(*n), line)?,
             ExprKind::Bool(b) => self.constant(Value::Bool(*b), line)?,
             ExprKind::Nil => self.constant(Value::Nil, line)?,
+            ExprKind::Str(s) => {
+                let i = self.chunk.strings.len() as u32;
+                self.chunk.strings.push(s.clone());
+                self.constant(Value::Str(i), line)?;
+            }
             ExprKind::Var(name) => {
                 let (i, local) = self.resolve(name)?;
                 self.chunk.emit_arg(if local { Op::GetLocal } else { Op::GetGlobal }, i, line);
