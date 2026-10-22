@@ -156,10 +156,16 @@ countdown(10);
 const $ = id => document.getElementById(id);
 const src = $('src'), gutter = $('gutter'), out = $('out'), status = $('status'), runBtn = $('run');
 const TIMEOUT_MS = 5000;
-let worker, timer, result = null, tab = 'output';
+// Unique per page load, so a cached worker.js can never pair with a newer lumen.wasm.
+const WORKER_URL = `worker.js?${Date.now()}`;
+let worker, timer, result = null, tab = 'output', renderQueued = false;
 
-for (const name of Object.keys(EXAMPLES)) $('examples').add(new Option(name, name));
-$('examples').onchange = e => { load(EXAMPLES[e.target.value]); run(); };
+const sel = $('examples');
+for (const name of Object.keys(EXAMPLES)) sel.add(new Option(name, name));
+const custom = new Option('Custom program', '');
+custom.disabled = custom.hidden = true;
+sel.add(custom);
+sel.onchange = () => { load(EXAMPLES[sel.value]); run(); };
 
 function load(text) { src.value = text; syncGutter(); }
 
@@ -168,7 +174,10 @@ function syncGutter() {
   gutter.textContent = Array.from({ length: n }, (_, i) => i + 1).join('\n');
   gutter.scrollTop = src.scrollTop;
 }
-src.addEventListener('input', syncGutter);
+src.addEventListener('input', () => {
+  syncGutter();
+  if (src.value !== EXAMPLES[sel.value]) sel.value = '';
+});
 src.addEventListener('scroll', () => { gutter.scrollTop = src.scrollTop; });
 src.addEventListener('keydown', e => {
   if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); run(); }
@@ -185,32 +194,51 @@ for (const t of document.querySelectorAll('.tab')) {
   };
 }
 
+// Messages arrive as the program runs: {ast}, {bytecode}, {output} per batch of lines,
+// then {error} or {gc}, then {done} (or {crash} if the VM itself failed).
 function newWorker() {
-  worker = new Worker('worker.js');
+  worker = new Worker(WORKER_URL);
   worker.onmessage = ({ data }) => {
-    clearTimeout(timer);
-    runBtn.disabled = false;
-    if (data.crash) { worker.terminate(); newWorker(); }
-    result = data;
-    status.textContent = data.crash ? '' :
-      `${data.ms < 1 ? data.ms.toFixed(2) : data.ms.toFixed(1)} ms` + (data.gc ? ` · ${data.gc}` : '');
-    render();
+    if ('output' in data) result.output += data.output;
+    else if (data.crash) result.error = data.crash;
+    else Object.assign(result, data);
+    if (data.done || data.crash) {
+      finish();
+      if (data.crash) { worker.terminate(); newWorker(); }
+      else status.textContent = `${data.ms < 1 ? data.ms.toFixed(2) : data.ms.toFixed(1)} ms` + (result.gc ? ` · ${result.gc}` : '');
+    }
+    queueRender();
   };
+}
+
+function finish() {
+  clearTimeout(timer);
+  runBtn.disabled = false;
+  result.done = true;
+  status.textContent = '';
 }
 
 function run() {
   if (runBtn.disabled) return;
   runBtn.disabled = true;
+  result = { output: '' };
   status.textContent = 'running…';
+  render();
   worker.postMessage({ src: src.value, stress: $('stress').checked });
   timer = setTimeout(() => {
     worker.terminate();
     newWorker();
-    runBtn.disabled = false;
-    result = { crash: `Stopped after ${TIMEOUT_MS / 1000} s. Is there a loop that never ends?` };
-    status.textContent = '';
+    finish();
+    result.error = `Stopped after ${TIMEOUT_MS / 1000} s. Is there a loop that never ends?`;
     render();
   }, TIMEOUT_MS);
+}
+
+// Output can arrive in many small messages; draw at most once per frame.
+function queueRender() {
+  if (renderQueued) return;
+  renderQueued = true;
+  requestAnimationFrame(() => { renderQueued = false; render(); });
 }
 
 function line(text, cls) {
@@ -221,16 +249,19 @@ function line(text, cls) {
 }
 
 function render() {
+  // Follow streaming output (and the final error) unless the reader has scrolled up.
+  const atBottom = out.scrollTop + out.clientHeight >= out.scrollHeight - 4;
   out.replaceChildren();
   if (!result) return;
-  if (result.crash) { out.append(line(result.crash, 'err')); return; }
   if (tab === 'output') {
     out.append(result.output);
     if (result.error) out.append(line(result.error, 'err'));
-    if (!result.output && !result.error) out.append(line('(no output)', 'note'));
-  } else {
-    const text = result[tab];
-    out.append(text || line(result.error ? 'Fix the errors to see this.' : '(empty program)', 'note'));
+    if (result.done && !result.output && !result.error) out.append(line('(no output)', 'note'));
+    if (atBottom) out.scrollTop = out.scrollHeight;
+  } else if (result[tab]) {
+    out.append(result[tab]);
+  } else if (result.done) {
+    out.append(line(result.error ? 'Fix the errors to see this.' : '(empty program)', 'note'));
   }
 }
 

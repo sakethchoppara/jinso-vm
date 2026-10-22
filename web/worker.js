@@ -1,7 +1,19 @@
 // Runs lumen.wasm off the main thread, so the page can kill a program that never ends.
-const ready = WebAssembly.instantiateStreaming(fetch('lumen.wasm')).then(r => r.instance.exports);
+// The wasm module reports back through emit(kind, ptr, len); each call becomes one message.
+const KINDS = ['output', 'error', 'bytecode', 'ast', 'gc']; // same order as src/wasm.rs
 const enc = new TextEncoder();
 const dec = new TextDecoder();
+let memory;
+
+// no-cache revalidates with the server (a cheap 304 when unchanged) instead of trusting a stale copy.
+const ready = WebAssembly.instantiateStreaming(fetch('lumen.wasm', { cache: 'no-cache' }), {
+  env: {
+    emit: (kind, ptr, len) => postMessage({ [KINDS[kind]]: dec.decode(new Uint8Array(memory.buffer, ptr, len)) }),
+  },
+}).then(r => {
+  memory = r.instance.exports.memory;
+  return r.instance.exports;
+});
 
 onmessage = async ({ data: { src, stress } }) => {
   let wasm;
@@ -16,11 +28,8 @@ onmessage = async ({ data: { src, stress } }) => {
   new Uint8Array(wasm.memory.buffer, ptr, bytes.length).set(bytes);
   try {
     const t0 = performance.now();
-    const len = wasm.run(ptr, bytes.length, stress ? 1 : 0);
-    const ms = performance.now() - t0;
-    const text = dec.decode(new Uint8Array(wasm.memory.buffer, wasm.result_ptr(), len));
-    const [output, error, bytecode, ast, gc] = text.split('\0');
-    postMessage({ output, error, bytecode, ast, gc, ms });
+    wasm.run(ptr, bytes.length, stress ? 1 : 0);
+    postMessage({ done: true, ms: performance.now() - t0 });
   } catch (e) {
     // A Rust panic traps the instance; the page replaces this worker.
     postMessage({ crash: `internal VM error: ${e.message}` });

@@ -36,10 +36,11 @@ cargo run --example fuzz -- 600     # 10 minutes of random input
 
 `web/` is a static page that runs the same compiler and VM, built for
 `wasm32-unknown-unknown`, with Output, Bytecode and Syntax tree tabs. It uses no
-wasm-bindgen. `src/wasm.rs` exports three plain functions (`alloc`, `run`, `result_ptr`),
-and about 20 lines of JS copy the source in and the results out. The VM runs in a Web
-Worker, so a program that never ends is stopped after 5 seconds instead of freezing the
-tab. GitHub Actions rebuilds it and deploys it to Pages on every push to `main`.
+wasm-bindgen. `src/wasm.rs` exports two plain functions (`alloc`, `run`) and imports one,
+`emit(kind, ptr, len)`, which it calls with the syntax tree, the bytecode, each batch of
+printed lines as they happen, and finally any error. The VM runs in a Web Worker, so a
+program that never ends is stopped after 5 seconds instead of freezing the tab, and the
+output it printed before then stays on screen. Output is capped at 10,000 lines. GitHub Actions rebuilds it and deploys it to Pages on every push to `main`.
 
 ## The language
 
