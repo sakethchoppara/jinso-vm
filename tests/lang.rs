@@ -261,3 +261,127 @@ fn deep_nesting_is_an_error_not_a_crash() {
     assert_eq!(run(&format!("print {}1{};", "(".repeat(100), ")".repeat(100))).unwrap(), "1\n");
     assert_eq!(run(&format!("print 0{};", " + 1".repeat(100))).unwrap(), "100\n");
 }
+
+// ---- v2: arrays ----
+
+#[test]
+fn arrays() {
+    for (src, want) in [
+        // the PRD's example
+        ("let a = [1, 2, 3]; push(a, 4); print a[0] + a[3]; a[1] = 20; print len(a); print a;", "5\n4\n[1, 20, 3, 4]\n"),
+        ("print []; print len([]); print [nil, true, -1];", "[]\n0\n[nil, true, -1]\n"),
+        ("print len(\"héllo\"); print len(\"\");", "5\n0\n"),
+        // reference semantics: two names, one array
+        ("let a = [1]; let b = a; push(b, 2); b[0] = 9; print a;", "[9, 2]\n"),
+        ("fn add(a, v) { push(a, v); } let a = []; add(a, 1); add(a, 2); print a;", "[1, 2]\n"),
+        ("let a = [1]; let b = a; print a == b; print a == [1]; print [] == [];", "true\nfalse\nfalse\n"),
+        // nested arrays, including assignment through two indexes
+        ("let m = [[1, 2], [3, 4]]; m[1][0] = 30; print m; print m[1][0] + m[0][1];", "[[1, 2], [30, 4]]\n32\n"),
+        ("let g = [[0, 0], [0, 0]]; let r = g[1]; r[1] = 5; print g;", "[[0, 0], [0, 5]]\n"),
+        // strings print raw at the top level, quoted inside arrays
+        ("let a = [\"x\", \"y\" + \"z\"]; print a; print a[1];", "[\"x\", \"yz\"]\nyz\n"),
+        // functions in arrays, including the built-ins
+        ("fn sq(n) { return n * n; } let fs = [sq, len]; print fs[0](4); print fs[1]([1, 2]); print fs;",
+         "16\n2\n[<fn sq>, <native len>]\n"),
+        // index expressions and evaluation order
+        ("let a = [10, 20, 30]; let i = 1; print a[i + 1]; a[i] = a[i] + 1; print a;", "30\n[10, 21, 30]\n"),
+        ("let a = []; let i = 0; while i < 5 { push(a, i * i); i = i + 1; } print a;", "[0, 1, 4, 9, 16]\n"),
+        ("print push([], 1);", "nil\n"),
+        ("fn f() { return [1, 2]; } print f()[1]; print len(f());", "2\n2\n"),
+        // a cycle prints as [...] instead of recursing forever
+        ("let a = [1]; push(a, a); print a; print len(a); print a[1][1][0];", "[1, [...]]\n2\n1\n"),
+        ("let a = []; let b = [a]; push(a, b); print a; print b;", "[[[...]]]\n[[[...]]]\n"),
+        // the built-ins are ordinary globals, so a program can shadow them
+        ("let len = 3; print len;", "3\n"),
+        ("fn push(a, b) { return a + b; } print push(1, 2);", "3\n"),
+        // locals holding arrays inside blocks and functions
+        ("if true { let a = [1]; let b = [a, a]; a[0] = 2; print b; }", "[[2], [2]]\n"),
+        ("fn sum(a) { let t = 0; let i = 0; while i < len(a) { t = t + a[i]; i = i + 1; } return t; } print sum([1, 2, 3, 4]);", "10\n"),
+        // GC: objects reachable only through array elements must survive collections
+        ("let a = [\"a\" + \"b\"]; let x = \"c\" + \"d\"; print a[0] + x;", "abcd\n"),
+        ("let a = [[[\"a\" + \"b\"]]]; let x = \"c\" + \"d\"; let y = [x]; print a[0][0][0];", "ab\n"),
+        ("fn mk(n) { return [n, \"s\" + \"t\"]; } let a = mk(1); let b = mk(2); print a; print b;", "[1, \"st\"]\n[2, \"st\"]\n"),
+        ("let a = []; let i = 0; while i < 50 { push(a, \"n\" + \"x\"); push(a, [i]); i = i + 1; } print len(a); print a[98]; print a[99];", "100\nnx\n[49]\n"),
+        ("let keep = []; let i = 0; while i < 30 { let t = [i, [i]]; if i % 10 == 0 { push(keep, t); } i = i + 1; } print keep;",
+         "[[0, [0]], [10, [10]], [20, [20]]]\n"),
+    ] {
+        assert_eq!(run(src).as_deref(), Ok(want), "{src}");
+    }
+}
+
+#[test]
+fn array_errors() {
+    for (src, want) in [
+        ("let a = [1, 2, 3];\nprint a[5];", "line 2: index 5 out of bounds for array of length 3"),
+        ("print [1][-1];", "line 1: index -1 out of bounds for array of length 1"),
+        ("let a = [1]; a[1] = 2;", "index 1 out of bounds for array of length 1"),
+        ("print [][0];", "index 0 out of bounds for array of length 0"),
+        ("print [1][\"0\"];", "line 1: array index must be an int, got str"),
+        ("let a = [1]; a[true] = 2;", "array index must be an int, got bool"),
+        ("let x = 5; print x[0];", "line 1: cannot index a value of type int"),
+        ("let s = \"abc\"; s[0] = 1;", "cannot index a value of type str"),
+        ("print nil[0];", "cannot index a value of type nil"),
+        ("print len(5);", "line 1: len() expects an array or str, got int"),
+        ("print len(nil);", "len() expects an array or str, got nil"),
+        ("push(1, 2);", "push() expects an array, got int"),
+        ("print len();", "len() takes 1 argument(s), got 0"),
+        ("push([]);", "push() takes 2 argument(s), got 1"),
+        ("print [1] + [2];", "operands must be two ints or two strs, got array and array"),
+        ("print [1] < [2];", "operands must be ints, got array and array"),
+        ("if [] { }", "condition must be a bool, got array"),
+        ("let a = [1]; a();", "can only call functions, got array"),
+    ] {
+        let err = run(src).unwrap_err();
+        assert!(err.contains(want), "{src}: got {err:?}");
+    }
+}
+
+#[test]
+fn array_syntax() {
+    for (src, want) in [
+        ("[1, 2, [3]]", "(array 1 2 (array 3))"),
+        ("a[0][1]", "(index (index a 0) 1)"),
+        ("f(1)[0](2)", "(call (index (call f 1) 0) 2)"),
+        ("-a[0] * 2", "(* (- (index a 0)) 2)"),
+    ] {
+        assert_eq!(ast(src), format!("(print {want})"), "{src}");
+    }
+    assert_eq!(lumen::parse("a[i + 1] = v;").unwrap()[0].to_string(), "(set-index a (+ i 1) v)");
+    for (src, want) in [
+        ("print [1, 2;", "expected ']'"),
+        ("print a[];", "expected expression, got ']'"),
+        ("print a[1;", "expected ']'"),
+        ("[1] = 2;", "1:5: can only assign to a variable or an array element"),
+        ("f() = 1;", "can only assign to a variable or an array element"),
+        ("1 + x = 2;", "can only assign to a variable or an array element"),
+        ("print @[;", "unexpected character '@'"),
+    ] {
+        let err = run(src).unwrap_err();
+        assert!(err.contains(want), "{src}: got {err:?}");
+    }
+    // long index chains count toward the nesting limit
+    let err = run(&format!("let a = [1]; print a{};", "[0]".repeat(100_000))).unwrap_err();
+    assert!(err.contains("nesting too deep"), "{err}");
+}
+
+#[test]
+fn unreachable_cycles_are_collected() {
+    // Each iteration makes a self-cycle and a two-array cycle, then drops them.
+    let src = "let i = 0; while i < 2000 { let a = [i]; push(a, a); let b = []; let c = [b]; push(b, c); i = i + 1; } print i;";
+    let (out, stats) = run_with(src, true).unwrap();
+    assert_eq!(out, "2000\n");
+    assert!(stats.freed > 5900, "{stats:?}");
+    assert!(stats.live <= 4, "{stats:?}");
+}
+
+#[test]
+fn marking_deep_nesting_uses_no_recursion() {
+    // A 200,000-deep chain [[[[...]]]]: recursive marking would overflow the Rust stack
+    // (tests run on 2 MB threads). The work stack stays tiny: the chain's next link plus
+    // whatever other roots are waiting, independent of the depth.
+    let src = "let a = []; let i = 0; while i < 200000 { a = [a]; i = i + 1; } print len(a); print a[0][0][0];";
+    let (out, stats) = run_with(src, false).unwrap();
+    assert_eq!(out, "1\n[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[...]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]\n");
+    assert!(stats.collections >= 1, "{stats:?}");
+    assert!(stats.peak_work <= 4, "{stats:?}");
+}

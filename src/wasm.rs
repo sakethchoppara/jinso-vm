@@ -91,8 +91,8 @@ pub unsafe extern "C" fn run(ptr: *mut u8, len: usize, gc_stress: u32) {
     let _ = out.flush();
     match result {
         Err(e) => send(ERROR, e.as_bytes()),
-        // Programs without strings have nothing to report.
+        // Programs that never touch the heap have nothing to report.
         Ok(s) if s.collections == 0 && s.live == 0 => {}
-        Ok(s) => send(GC, format!("{} GC cycles, {} strings freed, {} live", s.collections, s.freed, s.live).as_bytes()),
+        Ok(s) => send(GC, format!("{} GC cycles, {} objects freed, {} live", s.collections, s.freed, s.live).as_bytes()),
     }
 }

@@ -1,7 +1,74 @@
 use crate::chunk::{Chunk, Op};
 use crate::gc::{Heap, Stats};
 use crate::value::Value;
+use std::fmt::Write as _;
 use std::io::Write;
+
+type NativeFn = fn(&mut Heap, &[Value]) -> Result<Value, String>;
+
+/// Built-in functions: (name, arity, implementation). A global with one of these names
+/// starts out bound to it, so a program can still shadow it with its own `let` or `fn`.
+pub const NATIVES: &[(&str, usize, NativeFn)] = &[("len", 1, native_len), ("push", 2, native_push)];
+
+fn native_len(heap: &mut Heap, args: &[Value]) -> Result<Value, String> {
+    let n = match args[0] {
+        Value::Array(h) => heap.array(h).len(),
+        Value::Str { h, len } => heap.get(h, len).chars().count(),
+        v => return Err(format!("len() expects an array or str, got {}", v.type_name())),
+    };
+    Ok(Value::Int(n as i64))
+}
+
+fn native_push(heap: &mut Heap, args: &[Value]) -> Result<Value, String> {
+    let Value::Array(h) = args[0] else {
+        return Err(format!("push() expects an array, got {}", args[0].type_name()));
+    };
+    heap.push(h, args[1]);
+    Ok(Value::Nil)
+}
+
+/// Checks `target[i]` and returns the array handle and element position.
+fn element(heap: &Heap, target: Value, i: Value) -> Result<(u32, usize), String> {
+    let Value::Array(h) = target else {
+        return Err(format!("cannot index a value of type {}", target.type_name()));
+    };
+    let Value::Int(i) = i else {
+        return Err(format!("array index must be an int, got {}", i.type_name()));
+    };
+    let len = heap.array(h).len();
+    match usize::try_from(i) {
+        Ok(at) if at < len => Ok((h, at)),
+        _ => Err(format!("index {i} out of bounds for array of length {len}")),
+    }
+}
+
+/// Arrays nested deeper than this print as `[...]`, so printing never recurses unboundedly.
+const MAX_PRINT_DEPTH: usize = 64;
+
+/// Formats a value the way `print` shows it. Strings are raw at the top level and quoted
+/// inside arrays. An array that is already being printed (a cycle) shows as `[...]`.
+// ponytail: an array that shares one sub-array many times prints it in full each time,
+// so output can grow exponentially; cap total output if that ever matters.
+fn show(s: &mut String, chunk: &Chunk, heap: &Heap, v: Value, path: &mut Vec<u32>) {
+    match v {
+        Value::Str { h, len } if path.is_empty() => s.push_str(heap.get(h, len)),
+        Value::Str { h, len } => write!(s, "{:?}", heap.get(h, len)).unwrap(),
+        Value::Array(h) if path.contains(&h) || path.len() >= MAX_PRINT_DEPTH => s.push_str("[...]"),
+        Value::Array(h) => {
+            path.push(h);
+            s.push('[');
+            for (i, &item) in heap.array(h).iter().enumerate() {
+                if i > 0 {
+                    s.push_str(", ");
+                }
+                show(s, chunk, heap, item, path);
+            }
+            s.push(']');
+            path.pop();
+        }
+        v => s.push_str(&chunk.show(v)),
+    }
+}
 
 /// Bounds recursion depth; past this, a user program gets "stack overflow" instead of eating memory.
 const MAX_FRAMES: usize = 4096;
@@ -16,11 +83,16 @@ struct Frame {
 /// (every pop has a matching push), so hitting one is a compiler bug.
 ///
 /// GC roots are the value stack (which also holds every frame's arguments and locals,
-/// since frames only store ip and base), the globals, and the constant pool.
+/// since frames only store ip and base), the globals, and the constant pool. Marking
+/// follows array elements from there.
 pub fn run(chunk: &Chunk, out: &mut impl Write, gc_stress: bool) -> Result<Stats, String> {
     let mut heap = Heap::new(&chunk.strings, gc_stress);
     let mut stack: Vec<Value> = Vec::with_capacity(256);
-    let mut globals: Vec<Option<Value>> = vec![None; chunk.global_names.len()];
+    let mut globals: Vec<Option<Value>> = chunk
+        .global_names
+        .iter()
+        .map(|name| NATIVES.iter().position(|(n, ..)| n == name).map(|i| Value::Native(i as u8)))
+        .collect();
     let mut frames: Vec<Frame> = Vec::new();
     let mut ip = 0;
     // Stack index of the current function's slot 0 (its first argument); 0 at top level.
@@ -32,6 +104,16 @@ pub fn run(chunk: &Chunk, out: &mut impl Write, gc_stress: bool) -> Result<Stats
         ip += 1 + op.operand_len();
         let arg = || chunk.read_u16(at + 1) as usize;
         let err = |msg: String| format!("line {}: {msg}", chunk.lines[at]);
+
+        // Run a collection if one is due. Call this only while every value the current
+        // instruction still needs is on the stack, in a global or in the constant pool.
+        macro_rules! maybe_collect {
+            () => {
+                if heap.should_collect() {
+                    heap.collect(stack.iter().chain(globals.iter().flatten()).chain(&chunk.constants).copied());
+                }
+            };
+        }
 
         // Int binary op computed in place: the result overwrites the left operand.
         macro_rules! int_op {
@@ -75,6 +157,18 @@ pub fn run(chunk: &Chunk, out: &mut impl Write, gc_stress: bool) -> Result<Stats
             }
             // Stack before: [.. callee arg0 .. argN-1]. The new frame's base points at arg0,
             // so parameters are simply its first locals.
+            Op::Call if matches!(stack[stack.len() - 1 - arg()], Value::Native(_)) => {
+                let argc = arg();
+                let Value::Native(n) = stack[stack.len() - 1 - argc] else { unreachable!() };
+                let (name, arity, f) = NATIVES[n as usize];
+                if argc != arity {
+                    return Err(err(format!("{name}() takes {arity} argument(s), got {argc}")));
+                }
+                let args_at = stack.len() - argc;
+                let v = f(&mut heap, &stack[args_at..]).map_err(err)?;
+                stack.truncate(args_at - 1);
+                stack.push(v);
+            }
             Op::Call => {
                 let argc = arg();
                 let callee = stack[stack.len() - 1 - argc];
@@ -114,13 +208,30 @@ pub fn run(chunk: &Chunk, out: &mut impl Write, gc_stress: bool) -> Result<Stats
                         // stack (no longer roots), so they must be copied before a collection
                         // can free them.
                         let s = [heap.get(ah, alen), heap.get(bh, blen)].concat();
-                        if heap.should_collect() {
-                            heap.collect(stack.iter().chain(globals.iter().flatten()).chain(&chunk.constants).copied());
-                        }
-                        heap.alloc(s)
+                        maybe_collect!();
+                        heap.alloc_str(s)
                     }
                 };
                 stack.push(v);
+            }
+            Op::MakeArray => {
+                // The elements are still on the stack, so a collection here can't free them.
+                maybe_collect!();
+                let items = stack.split_off(stack.len() - arg());
+                stack.push(heap.alloc_array(items));
+            }
+            Op::Index => {
+                let i = stack.pop().unwrap();
+                let target = stack.pop().unwrap();
+                let (h, at) = element(&heap, target, i).map_err(err)?;
+                stack.push(heap.array(h)[at]);
+            }
+            Op::SetIndex => {
+                let v = stack.pop().unwrap();
+                let i = stack.pop().unwrap();
+                let target = stack.pop().unwrap();
+                let (h, at) = element(&heap, target, i).map_err(err)?;
+                heap.array_mut(h)[at] = v;
             }
             Op::Add => int_op!(|x, y| x.checked_add(y).map(Value::Int).ok_or("integer overflow")),
             Op::Sub => int_op!(|x, y| x.checked_sub(y).map(Value::Int).ok_or("integer overflow")),
@@ -152,11 +263,11 @@ pub fn run(chunk: &Chunk, out: &mut impl Write, gc_stress: bool) -> Result<Stats
                 };
                 stack.push(Value::Bool(eq));
             }
-            Op::Print => match stack.pop().unwrap() {
-                Value::Str { h, len } => writeln!(out, "{}", heap.get(h, len)),
-                v => writeln!(out, "{}", chunk.show(v)),
+            Op::Print => {
+                let mut s = String::new();
+                show(&mut s, chunk, &heap, stack.pop().unwrap(), &mut Vec::new());
+                writeln!(out, "{s}").map_err(|e| e.to_string())?;
             }
-            .map_err(|e| e.to_string())?,
         }
     }
     debug_assert!(stack.is_empty(), "compiler left values on the stack: {stack:?}");

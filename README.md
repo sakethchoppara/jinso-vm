@@ -46,10 +46,11 @@ output it printed before then stays on screen. Output is capped at 10,000 lines.
 
 | | |
 |---|---|
-| Types | `int` (64-bit, overflow is an error), `bool`, `str`, `nil`, functions |
+| Types | `int` (64-bit, overflow is an error), `bool`, `str`, `nil`, functions, arrays |
 | Operators | `+ - * / %`, `== != < <= > >=`, `and or not` (short-circuiting), `-x` |
 | Statements | `let x = e;`, `x = e;`, `print e;`, `if c { } else if c { } else { }`, `while c { }` |
 | Functions | `fn name(a, b) { return a + b; }`, recursion, functions as values |
+| Arrays | `[1, 2, 3]`, `a[i]`, `a[i] = v;`, `len(a)`, `push(a, v)`; shared by reference, may nest or contain themselves |
 | Scoping | top-level variables are globals; variables declared in a block are locals |
 | Comments | `// to end of line` |
 
@@ -203,6 +204,7 @@ buffer alive.
 - **Deep nesting**: the parser caps nesting at 128 levels, so input like 100,000 `(`s or a
   100,000-term `1 + 1 + …` is an error, not a Rust stack overflow. Tests cover each shape.
 
-## Not in v1
+## Not yet
 
-Closures, arrays, structs, a REPL, string escapes, and a standard library.
+Closures (in progress for v2), structs, a REPL, string escapes, and a standard library
+beyond `len` and `push`.

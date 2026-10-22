@@ -123,9 +123,10 @@ impl Parser {
         if self.depth >= MAX_DEPTH {
             return Err(self.error(&format!("nesting too deep (max {MAX_DEPTH})")));
         }
+        let saved = self.depth;
         self.depth += 1;
         let r = f(self);
-        self.depth -= 1;
+        self.depth = saved;
         r
     }
 
@@ -155,7 +156,7 @@ impl Parser {
             Tok::Fn => {
                 self.advance();
                 let name = self.ident()?;
-                let params = self.list(|p| p.ident())?;
+                let params = self.list(Tok::LParen, Tok::RParen, |p| p.ident())?;
                 return Ok(Stmt::Fn { name, params, body: self.block()?, line });
             }
             Tok::Return => {
@@ -173,26 +174,37 @@ impl Parser {
                 self.advance();
                 Stmt::Print(self.expr(1)?)
             }
-            // `x = ...` is an assignment; anything else starting with an identifier is an expression.
-            Tok::Ident(_) if self.toks[self.pos + 1].tok == Tok::Eq => {
-                let name = self.ident()?;
-                self.advance();
-                Stmt::Assign { name, value: self.expr(1)?, line }
+            // An expression, or an assignment if `=` follows a variable or an index.
+            _ => {
+                let e = self.expr(1)?;
+                if *self.peek() != Tok::Eq {
+                    Stmt::Expr(e)
+                } else {
+                    let t = &self.toks[self.pos];
+                    let bad = format!("{}:{}: can only assign to a variable or an array element", t.line, t.col);
+                    self.advance();
+                    let value = self.expr(1)?;
+                    match e.kind {
+                        ExprKind::Var(name) => Stmt::Assign { name, value, line },
+                        ExprKind::Index(target, index) => Stmt::IndexAssign { target: *target, index: *index, value, line: e.line },
+                        _ => return Err(bad),
+                    }
+                }
             }
-            _ => Stmt::Expr(self.expr(1)?),
         };
         self.expect(Tok::Semi, "';'")?;
         Ok(s)
     }
 
-    /// `( item, item, ... )`, at most 255 items (arity and argc fit in a byte).
-    fn list<T>(&mut self, mut item: impl FnMut(&mut Self) -> Result<T, String>) -> Result<Vec<T>, String> {
-        self.expect(Tok::LParen, "'('")?;
+    /// `open item, item, ... close`, at most 255 items (arity and argc fit in a byte).
+    fn list<T>(&mut self, open: Tok, close: Tok, mut item: impl FnMut(&mut Self) -> Result<T, String>) -> Result<Vec<T>, String> {
+        let (open_s, close_s) = (format!("{open}"), format!("{close}"));
+        self.expect(open, &open_s)?;
         let mut items = Vec::new();
-        if *self.peek() != Tok::RParen {
+        if *self.peek() != close {
             loop {
                 if items.len() == 255 {
-                    return Err(self.error("too many parameters or arguments (max 255)"));
+                    return Err(self.error("too many items (max 255)"));
                 }
                 items.push(item(self)?);
                 if *self.peek() != Tok::Comma {
@@ -201,7 +213,7 @@ impl Parser {
                 self.advance();
             }
         }
-        self.expect(Tok::RParen, "')'")?;
+        self.expect(close, &close_s)?;
         Ok(items)
     }
 
@@ -278,13 +290,25 @@ impl Parser {
         Ok(Expr { kind, line })
     }
 
-    /// primary followed by any number of `(args)`, so `f(1)(2)` parses.
+    /// primary followed by any number of `(args)` and `[index]`, so `f(1)(2)` and
+    /// `m[1][0]` parse. Each one deepens the tree, so it counts as nesting.
     fn call(&mut self) -> Result<Expr, String> {
         let mut e = self.primary()?;
-        while *self.peek() == Tok::LParen {
+        while matches!(self.peek(), Tok::LParen | Tok::LBracket) {
+            if self.depth >= MAX_DEPTH {
+                return Err(self.error(&format!("nesting too deep (max {MAX_DEPTH})")));
+            }
+            self.depth += 1;
             let line = self.line();
-            let args = self.list(|p| p.expr(1))?;
-            e = Expr { kind: ExprKind::Call(Box::new(e), args), line };
+            let kind = if *self.peek() == Tok::LParen {
+                ExprKind::Call(Box::new(e), self.list(Tok::LParen, Tok::RParen, |p| p.expr(1))?)
+            } else {
+                self.advance();
+                let index = self.expr(1)?;
+                self.expect(Tok::RBracket, "']'")?;
+                ExprKind::Index(Box::new(e), Box::new(index))
+            };
+            e = Expr { kind, line };
         }
         Ok(e)
     }
@@ -307,6 +331,7 @@ impl Parser {
                 _ => unreachable!(),
             },
             Tok::Ident(_) => ExprKind::Var(self.ident()?),
+            Tok::LBracket => ExprKind::Array(self.list(Tok::LBracket, Tok::RBracket, |p| p.expr(1))?),
             Tok::LParen => {
                 self.advance();
                 let e = self.expr(1)?;

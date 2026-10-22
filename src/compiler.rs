@@ -87,6 +87,12 @@ impl Compiler {
                 let (i, local) = self.resolve(name)?;
                 self.chunk.emit_arg(if local { Op::SetLocal } else { Op::SetGlobal }, i, *line);
             }
+            Stmt::IndexAssign { target, index, value, line } => {
+                self.expr(target)?;
+                self.expr(index)?;
+                self.expr(value)?;
+                self.chunk.emit(Op::SetIndex, *line);
+            }
             Stmt::Print(e) => {
                 self.expr(e)?;
                 self.chunk.emit(Op::Print, e.line);
@@ -185,6 +191,17 @@ impl Compiler {
                     self.expr(a)?;
                 }
                 self.chunk.emit_arg(Op::Call, args.len() as u16, line);
+            }
+            ExprKind::Array(items) => {
+                for item in items {
+                    self.expr(item)?;
+                }
+                self.chunk.emit_arg(Op::MakeArray, items.len() as u16, line);
+            }
+            ExprKind::Index(target, index) => {
+                self.expr(target)?;
+                self.expr(index)?;
+                self.chunk.emit(Op::Index, line);
             }
             ExprKind::Unary(op, inner) => {
                 self.expr(inner)?;

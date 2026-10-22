@@ -25,6 +25,9 @@ opcodes! {
     Loop,         // u16 backward offset
     Pop,
     Call,         // u16 argument count; callee and args are on the stack
+    MakeArray,    // u16 element count; elements are on the stack
+    Index,        // target index -> element
+    SetIndex,     // target index value ->
     Return,
     Add,
     Sub,
@@ -52,7 +55,8 @@ impl Op {
             | Op::Jump
             | Op::JumpIfFalse
             | Op::Loop
-            | Op::Call => 2,
+            | Op::Call
+            | Op::MakeArray => 2,
             _ => 0,
         }
     }
@@ -115,6 +119,7 @@ impl Chunk {
     pub fn show(&self, v: Value) -> String {
         match v {
             Value::Fn(i) => format!("<fn {}>", self.functions[i as usize].name),
+            Value::Native(i) => format!("<native {}>", crate::vm::NATIVES[i as usize].0),
             Value::Str { h, .. } => format!("{:?}", self.strings[h as usize]),
             v => v.to_string(),
         }

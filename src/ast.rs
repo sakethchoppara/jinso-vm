@@ -39,12 +39,15 @@ pub enum ExprKind {
     Unary(UnOp, Box<Expr>),
     Binary(BinOp, Box<Expr>, Box<Expr>),
     Call(Box<Expr>, Vec<Expr>),
+    Array(Vec<Expr>),
+    Index(Box<Expr>, Box<Expr>),
 }
 
 #[derive(Debug)]
 pub enum Stmt {
     Let { name: String, init: Expr, line: u32 },
     Assign { name: String, value: Expr, line: u32 },
+    IndexAssign { target: Expr, index: Expr, value: Expr, line: u32 }, // target[index] = value
     Print(Expr),
     If { cond: Expr, then: Vec<Stmt>, els: Vec<Stmt>, line: u32 }, // `else if` nests an If in els
     While { cond: Expr, body: Vec<Stmt>, line: u32 },
@@ -101,6 +104,14 @@ impl fmt::Display for Expr {
                 }
                 write!(f, ")")
             }
+            ExprKind::Array(items) => {
+                write!(f, "(array")?;
+                for e in items {
+                    write!(f, " {e}")?;
+                }
+                write!(f, ")")
+            }
+            ExprKind::Index(target, index) => write!(f, "(index {target} {index})"),
         }
     }
 }
@@ -110,6 +121,7 @@ impl fmt::Display for Stmt {
         match self {
             Stmt::Let { name, init, .. } => write!(f, "(let {name} {init})"),
             Stmt::Assign { name, value, .. } => write!(f, "(set {name} {value})"),
+            Stmt::IndexAssign { target, index, value, .. } => write!(f, "(set-index {target} {index} {value})"),
             Stmt::Print(e) => write!(f, "(print {e})"),
             Stmt::If { cond, then, els, .. } if els.is_empty() => write!(f, "(if {cond} {})", Block(then)),
             Stmt::If { cond, then, els, .. } => write!(f, "(if {cond} {} {})", Block(then), Block(els)),

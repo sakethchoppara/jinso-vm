@@ -138,6 +138,22 @@ while i < 3000 {
 print wrap("lumen");
 print s == s;
 `,
+  'Arrays': `// Arrays live on the GC heap and are shared, not copied.
+let grid = [[1, 2, 3], [4, 5, 6]];
+let row = grid[1];
+row[0] = 40;            // row and grid[1] are the same array
+print grid;
+
+let squares = [];
+let i = 0;
+while i < 6 { push(squares, i * i); i = i + 1; }
+print squares;
+print len(squares);
+
+let me = ["self"];
+push(me, me);           // a cycle prints as [...]
+print me;
+`,
   'Errors': `// The parser recovers after an error,
 // so it reports every syntax error in one pass.
 let = 1;
