@@ -122,19 +122,21 @@ while i < 50 {
   i = i + 1;
 }
 `,
-  'Strings and GC': `// Strings live on a garbage-collected heap.
-// Tick "GC stress" to collect before every allocation.
-fn repeat(s, n) {
-  let out = "";
-  while n > 0 { out = out + s; n = n - 1; }
-  return out;
+  'Strings and GC': `// Strings live on a garbage-collected heap. Run this, then
+// tick "GC stress" to collect before every allocation and compare.
+fn wrap(s) {
+  return "[" + s + "]";   // builds a new string: garbage once unused
 }
 
-let line = repeat("=", 24);
-print line;
-print "lumen" + " " + "vm";
-print repeat("ab", 3) == "ababab";
-print line;
+let s = "";
+let i = 0;
+while i < 3000 {
+  s = s + "x";           // appends in place: no new object
+  let w = wrap(s);       // a fresh copy each iteration
+  i = i + 1;
+}
+print wrap("lumen");
+print s == s;
 `,
   'Errors': `// The parser recovers after an error,
 // so it reports every syntax error in one pass.

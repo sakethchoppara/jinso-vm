@@ -1,12 +1,15 @@
-// week 5: strings live on the GC heap. Try: lumen run --gc-stress examples/strings.lm
-fn repeat(s, n) {
-  let out = "";
-  while n > 0 { out = out + s; n = n - 1; }
-  return out;
+// Strings live on a garbage-collected heap. Run this, then
+// tick "GC stress" to collect before every allocation and compare.
+fn wrap(s) {
+  return "[" + s + "]";   // builds a new string: garbage once unused
 }
 
-let line = repeat("=", 20);
-print line;
-print "lumen" + " " + "vm";
-print repeat("ab", 3) == "ababab";
-print line;
+let s = "";
+let i = 0;
+while i < 3000 {
+  s = s + "x";           // appends in place: no new object
+  let w = wrap(s);       // a fresh copy each iteration
+  i = i + 1;
+}
+print wrap("lumen");
+print s == s;

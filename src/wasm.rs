@@ -38,6 +38,8 @@ pub unsafe extern "C" fn run(ptr: *mut u8, len: usize, gc_stress: u32) -> usize 
                 Ok(chunk) => {
                     bytecode = crate::disasm::disassemble(&chunk);
                     match crate::vm::run(&chunk, &mut out, gc_stress != 0) {
+                        // Programs without strings have nothing to report.
+                        Ok(s) if s.collections == 0 && s.live == 0 => {}
                         Ok(s) => gc = format!("{} GC cycles, {} strings freed, {} live", s.collections, s.freed, s.live),
                         Err(e) => error = e,
                     }
