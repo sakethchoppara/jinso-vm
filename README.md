@@ -163,9 +163,25 @@ deliberately to confirm the suite catches it.
 
 | Benchmark | lumen | CPython 3.13.5 | lumen vs CPython | lumen instructions |
 |---|---|---|---|---|
-| fib | 0.132s | 0.111s | 1.19x slower | 1539M |
-| loop | 0.534s | 0.610s | 1.14x faster | 7032M |
-| strings | 0.070s | 0.070s | 1.00x faster | 893M |
+| fib | 0.116s | 0.114s | 1.02x slower | 1147M |
+| loop | 0.476s | 0.609s | 1.28x faster | 5072M |
+| strings | 0.063s | 0.072s | 1.14x faster | 710M |
+
+### Optimizations in v2, chosen by profiling
+
+`perf` showed the VM spending most of its time decoding and dispatching instructions, not
+executing them ([`docs/profiling.md`](docs/profiling.md)). Two changes, measured in
+instructions executed (millions):
+
+| Benchmark | v1 | v2 before | decode once ([0002](docs/decisions/0002-predecode-bytecode.md)) | + compare-and-branch ([0003](docs/decisions/0003-compare-and-branch.md)) | vs v1 |
+|---|---|---|---|---|---|
+| fib | 1477 | 1539 | 1255 | 1147 | −22% |
+| loop | 6933 | 7033 | 5473 | 5072 | −27% |
+| strings | 856 | 893 | 750 | 709 | −17% |
+
+"v2 before" is v2 with arrays and closures, after fixing the regression they caused.
+In wall-clock time against v1: fib 0.132s → 0.116s, loop 0.579s → 0.476s, strings
+0.075s → 0.063s.
 
 Wall-clock time moves by about ±5% between builds from code layout alone, so the last
 column, instructions executed as counted by `perf stat`, is what to compare when judging

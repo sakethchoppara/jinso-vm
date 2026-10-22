@@ -22,6 +22,12 @@ opcodes! {
     SetLocal,     // u16 stack slot
     Jump,         // u16 forward offset
     JumpIfFalse,  // u16 forward offset; pops the condition, which must be a bool
+    // Compare-and-branch for `if a < b` / `while a < b`: pop two ints, jump (u16 forward
+    // offset) unless the comparison holds. Saves pushing and popping a bool.
+    JumpIfNotLt,
+    JumpIfNotLe,
+    JumpIfNotGt,
+    JumpIfNotGe,
     Loop,         // u16 backward offset
     Pop,
     Call,         // u16 argument count; callee and args are on the stack
@@ -44,32 +50,8 @@ opcodes! {
     Lt,
     Gt,
     Print,
-    Bad, // never emitted; fills the rest of DECODE
+    Bad, // never emitted; marks offsets in the VM's decoded code that aren't instruction starts
 }
-
-/// Opcode for every byte value. Indexing 256 entries with a u8 needs no bounds check;
-/// bytes past the last real opcode decode to `Bad`, which the compiler never emits.
-pub const DECODE: [Op; 256] = {
-    let mut table = [Op::Bad; 256];
-    let mut i = 0;
-    while i < Op::ALL.len() {
-        table[i] = Op::ALL[i];
-        i += 1;
-    }
-    table
-};
-
-/// `operand_len` for every opcode byte, so the VM's decode step is one load with no
-/// bounds check (a u8 index into 256 entries can't be out of range) instead of a match.
-pub const OPERAND_LEN: [u8; 256] = {
-    let mut table = [0u8; 256];
-    let mut i = 0;
-    while i < Op::ALL.len() {
-        table[i] = Op::ALL[i].operand_len() as u8;
-        i += 1;
-    }
-    table
-};
 
 impl Op {
     /// Bytes of operand following the opcode.
@@ -83,6 +65,10 @@ impl Op {
             | Op::SetLocal
             | Op::Jump
             | Op::JumpIfFalse
+            | Op::JumpIfNotLt
+            | Op::JumpIfNotLe
+            | Op::JumpIfNotGt
+            | Op::JumpIfNotGe
             | Op::Loop
             | Op::Call
             | Op::Closure

@@ -191,13 +191,12 @@ fn disassembler_shows_jump_targets() {
 0003    | DefineGlobal    0  (i)
 0006    2 GetGlobal       0  (i)
 0009    | Constant        1  (3)
-0012    | Lt           
-0013    | JumpIfFalse    13  (-> 0029)
-0016    3 GetGlobal       0  (i)
-0019    | Constant        2  (1)
-0022    | Add          
-0023    | SetGlobal       0  (i)
-0026    2 Loop           23  (-> 0006)
+0012    | JumpIfNotLt    13  (-> 0028)
+0015    3 GetGlobal       0  (i)
+0018    | Constant        2  (1)
+0021    | Add          
+0022    | SetGlobal       0  (i)
+0025    2 Loop           22  (-> 0006)
 ";
     assert_eq!(lumen::disasm::disassemble(&chunk), want);
 }
@@ -473,5 +472,34 @@ fn disassembler_shows_upvalues() {
     let dis = lumen::disasm::disassemble(&lumen::compile(&format!("{COUNTER}print make_counter()();")).unwrap());
     for want in ["== fn next ==", "GetUpvalue      0  (count)", "SetUpvalue      0  (count)", "Closure         1  (<fn next>)", "local 0 (count)"] {
         assert!(dis.contains(want), "missing {want:?} in:\n{dis}");
+    }
+}
+
+#[test]
+fn compare_and_branch() {
+    // if/while conditions that are comparisons compile to one JumpIfNot* instruction;
+    // results must match the general path (a comparison used as a value).
+    for (src, want) in [
+        ("let r = []; let a = 1; let b = 2;
+          if a < b { push(r, 1); } if b < a { push(r, 2); } if a < a { push(r, 3); }
+          if a <= b { push(r, 4); } if a <= a { push(r, 5); } if b <= a { push(r, 6); }
+          if b > a { push(r, 7); } if a > b { push(r, 8); } if a > a { push(r, 9); }
+          if b >= a { push(r, 10); } if a >= a { push(r, 11); } if a >= b { push(r, 12); }
+          print r;", "[1, 4, 5, 7, 10, 11]\n"),
+        ("let i = 0; while i <= 3 { i = i + 1; } print i; while i >= 1 { i = i - 2; } print i;", "4\n0\n"),
+        ("let i = 10; while i > 7 { i = i - 1; } print i; if i < 8 { print \"else not taken\"; } else { print 0; }", "7\nelse not taken\n"),
+        // both operands are evaluated, left first, before the comparison
+        ("fn t(x) { print x; return x; } if t(1) < t(2) { print \"yes\"; } while t(5) >= t(9) { }", "1\n2\nyes\n5\n9\n"),
+        // other conditions still take the general path
+        ("if 1 == 1 { print 1; } if not (2 < 1) { print 2; } if 1 < 2 and 2 < 3 { print 3; }", "1\n2\n3\n"),
+    ] {
+        assert_eq!(run(src).as_deref(), Ok(want), "{src}");
+    }
+    for (src, want) in [
+        ("if 1 < \"a\" { }", "line 1: operands must be ints, got int and str"),
+        ("let x = nil;\nwhile x >= 0 { }", "line 2: operands must be ints, got nil and int"),
+    ] {
+        let err = run(src).unwrap_err();
+        assert!(err.contains(want), "{src}: got {err:?}");
     }
 }

@@ -1,7 +1,8 @@
 # 0001: Regression from arrays and closures, and how it was found
 
 **Status:** resolved. Every benchmark is within the 5% budget of v1, measured by
-instruction count.
+instruction count. The decode tables were later replaced by decoding the whole program
+once before running: see [0002](0002-predecode-bytecode.md).
 
 ## Symptom
 

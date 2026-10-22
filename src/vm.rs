@@ -1,4 +1,4 @@
-use crate::chunk::{Chunk, DECODE, OPERAND_LEN, Op};
+use crate::chunk::{Chunk, Op};
 use crate::gc::{Heap, Stats, Upvalue};
 use crate::upvalues::OpenUpvalues;
 use crate::value::Value;
@@ -72,6 +72,31 @@ fn show(s: &mut String, chunk: &Chunk, heap: &Heap, v: Value, path: &mut Vec<u32
     }
 }
 
+/// One instruction, decoded once before the program runs.
+#[derive(Clone, Copy)]
+struct Instr {
+    op: Op,
+    arg: u16,  // the u16 operand, or 0 for opcodes without one
+    next: u32, // byte offset of the following instruction
+}
+
+/// Decodes the bytecode into one `Instr` per byte offset, so `ip`, jump offsets and
+/// function addresses keep meaning exactly what they mean in `Chunk::code`. Only offsets
+/// where an instruction starts are filled; the rest hold `Op::Bad` and are never reached.
+/// This moves the opcode lookup and the two-byte operand read out of the main loop.
+fn predecode(code: &[u8]) -> Vec<Instr> {
+    let mut out = vec![Instr { op: Op::Bad, arg: 0, next: 0 }; code.len()];
+    let mut ip = 0;
+    while ip < code.len() {
+        let op = Op::ALL[code[ip] as usize];
+        let next = ip + 1 + op.operand_len();
+        let arg = if op.operand_len() == 2 { u16::from_be_bytes([code[ip + 1], code[ip + 2]]) } else { 0 };
+        out[ip] = Instr { op, arg, next: next as u32 };
+        ip = next;
+    }
+    out
+}
+
 /// Bounds recursion depth; past this, a user program gets "stack overflow" instead of eating memory.
 const MAX_FRAMES: usize = 4096;
 
@@ -106,12 +131,12 @@ pub fn run(chunk: &Chunk, out: &mut impl Write, gc_stress: bool) -> Result<Stats
     let mut closure: Option<u32> = None;
     let mut open = OpenUpvalues::default();
 
-    while ip < chunk.code.len() {
+    let code = predecode(&chunk.code);
+    while ip < code.len() {
         let at = ip;
-        let byte = chunk.code[ip];
-        let op = DECODE[byte as usize];
-        ip += 1 + OPERAND_LEN[byte as usize] as usize;
-        let arg = || chunk.read_u16(at + 1) as usize;
+        let Instr { op, arg, next } = code[ip];
+        let arg = arg as usize;
+        ip = next as usize;
         let err = |msg: String| format!("line {}: {msg}", chunk.lines[at]);
 
         // Run a collection if one is due. Call this only while every value the current
@@ -140,26 +165,45 @@ pub fn run(chunk: &Chunk, out: &mut impl Write, gc_stress: bool) -> Result<Stats
             }};
         }
 
+        // Pop two ints and jump unless `a OP b` holds.
+        macro_rules! cmp_jump {
+            ($cmp:tt) => {{
+                let n = stack.len();
+                let (a, b) = (stack[n - 2], stack[n - 1]);
+                let (Value::Int(x), Value::Int(y)) = (a, b) else {
+                    return Err(err(format!("operands must be ints, got {} and {}", a.type_name(), b.type_name())));
+                };
+                stack.truncate(n - 2);
+                if !(x $cmp y) {
+                    ip += arg;
+                }
+            }};
+        }
+
         match op {
-            Op::Constant => stack.push(chunk.constants[arg()]),
-            Op::GetGlobal => match globals[arg()] {
+            Op::JumpIfNotLt => cmp_jump!(<),
+            Op::JumpIfNotLe => cmp_jump!(<=),
+            Op::JumpIfNotGt => cmp_jump!(>),
+            Op::JumpIfNotGe => cmp_jump!(>=),
+            Op::Constant => stack.push(chunk.constants[arg]),
+            Op::GetGlobal => match globals[arg] {
                 Some(v) => stack.push(v),
-                None => return Err(err(format!("undefined variable '{}'", chunk.global_names[arg()]))),
+                None => return Err(err(format!("undefined variable '{}'", chunk.global_names[arg]))),
             },
             Op::SetGlobal => {
-                if globals[arg()].is_none() {
-                    return Err(err(format!("undefined variable '{}'", chunk.global_names[arg()])));
+                if globals[arg].is_none() {
+                    return Err(err(format!("undefined variable '{}'", chunk.global_names[arg])));
                 }
-                globals[arg()] = stack.pop();
+                globals[arg] = stack.pop();
             }
-            Op::DefineGlobal => globals[arg()] = stack.pop(),
-            Op::GetLocal => stack.push(stack[base + arg()]),
-            Op::SetLocal => stack[base + arg()] = stack.pop().unwrap(),
-            Op::Jump => ip += arg(),
-            Op::Loop => ip -= arg(),
+            Op::DefineGlobal => globals[arg] = stack.pop(),
+            Op::GetLocal => stack.push(stack[base + arg]),
+            Op::SetLocal => stack[base + arg] = stack.pop().unwrap(),
+            Op::Jump => ip += arg,
+            Op::Loop => ip -= arg,
             Op::JumpIfFalse => match stack.pop().unwrap() {
                 Value::Bool(true) => {}
-                Value::Bool(false) => ip += arg(),
+                Value::Bool(false) => ip += arg,
                 v => return Err(err(format!("condition must be a bool, got {}", v.type_name()))),
             },
             Op::Pop => {
@@ -168,7 +212,7 @@ pub fn run(chunk: &Chunk, out: &mut impl Write, gc_stress: bool) -> Result<Stats
             // Stack before: [.. callee arg0 .. argN-1]. The new frame's base points at arg0,
             // so parameters are simply its first locals.
             Op::Call => {
-                let argc = arg();
+                let argc = arg;
                 let callee = stack[stack.len() - 1 - argc];
                 let (f, callee_closure) = match callee {
                     Value::Fn(f) => (f, None),
@@ -203,7 +247,7 @@ pub fn run(chunk: &Chunk, out: &mut impl Write, gc_stress: bool) -> Result<Stats
             // (shared with any other closure that captured it) or one of our own upvalues.
             Op::Closure => {
                 maybe_collect!(); // before allocating, while nothing new is unrooted
-                let f = arg();
+                let f = arg;
                 let mut ups = Vec::with_capacity(chunk.functions[f].upvalues.len());
                 for u in &chunk.functions[f].upvalues {
                     ups.push(match u.is_local {
@@ -214,7 +258,7 @@ pub fn run(chunk: &Chunk, out: &mut impl Write, gc_stress: bool) -> Result<Stats
                 stack.push(heap.alloc_closure(f as u16, ups));
             }
             Op::GetUpvalue => {
-                let u = heap.closure(closure.unwrap()).1[arg()];
+                let u = heap.closure(closure.unwrap()).1[arg];
                 stack.push(match heap.upvalue(u) {
                     Upvalue::Open(slot) => stack[slot],
                     Upvalue::Closed(v) => v,
@@ -222,7 +266,7 @@ pub fn run(chunk: &Chunk, out: &mut impl Write, gc_stress: bool) -> Result<Stats
             }
             Op::SetUpvalue => {
                 let v = stack.pop().unwrap();
-                let u = heap.closure(closure.unwrap()).1[arg()];
+                let u = heap.closure(closure.unwrap()).1[arg];
                 match heap.upvalue(u) {
                     Upvalue::Open(slot) => stack[slot] = v,
                     Upvalue::Closed(_) => heap.set_upvalue(u, Upvalue::Closed(v)),
@@ -267,7 +311,7 @@ pub fn run(chunk: &Chunk, out: &mut impl Write, gc_stress: bool) -> Result<Stats
             Op::MakeArray => {
                 // The elements are still on the stack, so a collection here can't free them.
                 maybe_collect!();
-                let items = stack.split_off(stack.len() - arg());
+                let items = stack.split_off(stack.len() - arg);
                 stack.push(heap.alloc_array(items));
             }
             Op::Index => {

@@ -34,7 +34,9 @@ pub fn disassemble(chunk: &Chunk) -> String {
                     }
                     Ok(())
                 }
-                Op::Jump | Op::JumpIfFalse => write!(s, "{i:4}  (-> {:04})", ip + 3 + i),
+                Op::Jump | Op::JumpIfFalse | Op::JumpIfNotLt | Op::JumpIfNotLe | Op::JumpIfNotGt | Op::JumpIfNotGe => {
+                    write!(s, "{i:4}  (-> {:04})", ip + 3 + i)
+                }
                 Op::Loop => write!(s, "{i:4}  (-> {:04})", ip + 3 - i),
                 _ => write!(s, "{i:4}  ({})", chunk.global_names[i]),
             }

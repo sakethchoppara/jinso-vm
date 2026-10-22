@@ -223,8 +223,7 @@ impl Compiler {
             }
             // cond; JumpIfFalse else; then; [Jump end; else: els;] end:
             Stmt::If { cond, then, els, line } => {
-                self.expr(cond)?;
-                let to_else = self.chunk.emit_jump(Op::JumpIfFalse, cond.line);
+                let to_else = self.cond_jump(cond)?;
                 self.block(then, *line)?;
                 if els.is_empty() {
                     self.chunk.patch_jump(to_else)?;
@@ -238,14 +237,38 @@ impl Compiler {
             // start: cond; JumpIfFalse exit; body; Loop start; exit:
             Stmt::While { cond, body, line } => {
                 let start = self.chunk.code.len();
-                self.expr(cond)?;
-                let to_exit = self.chunk.emit_jump(Op::JumpIfFalse, cond.line);
+                let to_exit = self.cond_jump(cond)?;
                 self.block(body, *line)?;
                 self.chunk.emit_loop(start, *line)?;
                 self.chunk.patch_jump(to_exit)?;
             }
         }
         Ok(())
+    }
+
+    /// Compiles an `if`/`while` condition and the jump taken when it's false; returns the
+    /// jump to patch. A comparison becomes one compare-and-branch instruction instead of
+    /// `Lt` (push a bool) followed by `JumpIfFalse` (pop it).
+    fn cond_jump(&mut self, cond: &Expr) -> Result<usize, String> {
+        let fused = match &cond.kind {
+            ExprKind::Binary(BinOp::Lt, l, r) => Some((Op::JumpIfNotLt, l, r)),
+            ExprKind::Binary(BinOp::Le, l, r) => Some((Op::JumpIfNotLe, l, r)),
+            ExprKind::Binary(BinOp::Gt, l, r) => Some((Op::JumpIfNotGt, l, r)),
+            ExprKind::Binary(BinOp::Ge, l, r) => Some((Op::JumpIfNotGe, l, r)),
+            _ => None,
+        };
+        let op = match fused {
+            Some((op, l, r)) => {
+                self.expr(l)?;
+                self.expr(r)?;
+                op
+            }
+            None => {
+                self.expr(cond)?;
+                Op::JumpIfFalse
+            }
+        };
+        Ok(self.chunk.emit_jump(op, cond.line))
     }
 
     fn expr(&mut self, e: &Expr) -> Result<(), String> {
