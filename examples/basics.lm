@@ -1,0 +1,8 @@
+// weeks 1-2: arithmetic, comparison, variables
+let width = 3;
+let height = 4 + 1;
+let area = width * height;
+print area;             // 15
+area = -(area - 5) / 2;
+print area;             // -5
+print area < 0 == true; // true

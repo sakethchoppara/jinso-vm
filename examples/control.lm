@@ -1,0 +1,23 @@
+// week 3: if/else, while, and/or, block-scoped locals
+
+// Collatz: steps for 27 to reach 1
+let n = 27;
+let steps = 0;
+while n != 1 {
+  if n % 2 == 0 { n = n / 2; } else { n = 3 * n + 1; }
+  steps = steps + 1;
+}
+print steps; // 111
+
+// primes below 30 (d and prime are locals, popped each iteration)
+let i = 2;
+while i < 30 {
+  let d = 2;
+  let prime = true;
+  while d * d <= i and prime {
+    if i % d == 0 { prime = false; }
+    d = d + 1;
+  }
+  if prime { print i; }
+  i = i + 1;
+}
