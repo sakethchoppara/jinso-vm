@@ -44,11 +44,36 @@ opcodes! {
     Lt,
     Gt,
     Print,
+    Bad, // never emitted; fills the rest of DECODE
 }
+
+/// Opcode for every byte value. Indexing 256 entries with a u8 needs no bounds check;
+/// bytes past the last real opcode decode to `Bad`, which the compiler never emits.
+pub const DECODE: [Op; 256] = {
+    let mut table = [Op::Bad; 256];
+    let mut i = 0;
+    while i < Op::ALL.len() {
+        table[i] = Op::ALL[i];
+        i += 1;
+    }
+    table
+};
+
+/// `operand_len` for every opcode byte, so the VM's decode step is one load with no
+/// bounds check (a u8 index into 256 entries can't be out of range) instead of a match.
+pub const OPERAND_LEN: [u8; 256] = {
+    let mut table = [0u8; 256];
+    let mut i = 0;
+    while i < Op::ALL.len() {
+        table[i] = Op::ALL[i].operand_len() as u8;
+        i += 1;
+    }
+    table
+};
 
 impl Op {
     /// Bytes of operand following the opcode.
-    pub fn operand_len(self) -> usize {
+    pub const fn operand_len(self) -> usize {
         match self {
             Op::Constant
             | Op::GetGlobal

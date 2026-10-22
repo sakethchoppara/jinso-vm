@@ -23,6 +23,7 @@ impl OpenUpvalues {
 
     /// Closes every upvalue at or above `from`, copying the slot's value into the upvalue,
     /// because those slots are about to be popped (block exit) or truncated (return).
+    #[inline] // runs on every Return, where the list is usually empty
     pub fn close(&mut self, heap: &mut Heap, stack: &[Value], from: usize) {
         while let Some(&(slot, h)) = self.0.last() {
             if slot < from {

@@ -1,4 +1,4 @@
-use crate::chunk::{Chunk, Op};
+use crate::chunk::{Chunk, DECODE, OPERAND_LEN, Op};
 use crate::gc::{Heap, Stats, Upvalue};
 use crate::upvalues::OpenUpvalues;
 use crate::value::Value;
@@ -108,8 +108,9 @@ pub fn run(chunk: &Chunk, out: &mut impl Write, gc_stress: bool) -> Result<Stats
 
     while ip < chunk.code.len() {
         let at = ip;
-        let op = Op::ALL[chunk.code[ip] as usize];
-        ip += 1 + op.operand_len();
+        let byte = chunk.code[ip];
+        let op = DECODE[byte as usize];
+        ip += 1 + OPERAND_LEN[byte as usize] as usize;
         let arg = || chunk.read_u16(at + 1) as usize;
         let err = |msg: String| format!("line {}: {msg}", chunk.lines[at]);
 
@@ -312,6 +313,7 @@ pub fn run(chunk: &Chunk, out: &mut impl Write, gc_stress: bool) -> Result<Stats
                 };
                 stack.push(Value::Bool(eq));
             }
+            Op::Bad => unreachable!("corrupt bytecode at {at}"),
             Op::Print => {
                 let mut s = String::new();
                 show(&mut s, chunk, &heap, stack.pop().unwrap(), &mut Vec::new());

@@ -161,11 +161,18 @@ deliberately to confirm the suite catches it.
 
 `./scripts/bench.sh`: best of 5 runs, AMD Ryzen 7 5800HS, Linux, release build.
 
-| Benchmark | lumen | CPython 3.13.5 | lumen vs CPython |
-|---|---|---|---|
-| fib | 0.132s | 0.113s | 1.17x slower |
-| loop | 0.579s | 0.612s | 1.06x faster |
-| strings | 0.075s | 0.070s | 1.07x slower |
+| Benchmark | lumen | CPython 3.13.5 | lumen vs CPython | lumen instructions |
+|---|---|---|---|---|
+| fib | 0.132s | 0.111s | 1.19x slower | 1539M |
+| loop | 0.534s | 0.610s | 1.14x faster | 7032M |
+| strings | 0.070s | 0.070s | 1.00x faster | 893M |
+
+Wall-clock time moves by about ±5% between builds from code layout alone, so the last
+column, instructions executed as counted by `perf stat`, is what to compare when judging
+a change to the VM. It barely changes between runs. That's how a real 7–12% slowdown from
+adding arrays and closures was found and fixed after wall-clock numbers had hidden part of
+it: see [`docs/decisions/0001`](docs/decisions/0001-call-path-regression-from-closures.md)
+and [`docs/profiling.md`](docs/profiling.md).
 
 | Program | What it measures |
 |---|---|
