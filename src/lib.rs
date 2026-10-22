@@ -5,6 +5,7 @@ pub mod disasm;
 pub mod gc;
 pub mod lexer;
 pub mod parser;
+pub mod upvalues;
 pub mod value;
 pub mod vm;
 #[cfg(target_arch = "wasm32")]

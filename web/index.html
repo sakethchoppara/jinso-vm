@@ -138,6 +138,24 @@ while i < 3000 {
 print wrap("lumen");
 print s == s;
 `,
+  'Closures': `// A closure keeps the variables it uses alive after
+// the function that made them returns. Open the Bytecode
+// tab to see Closure, GetUpvalue and SetUpvalue.
+fn make_counter() {
+  let count = 0;
+  fn next() {
+    count = count + 1;
+    return count;
+  }
+  return next;
+}
+
+let a = make_counter();
+let b = make_counter();
+print a();   // 1
+print a();   // 2
+print b();   // 1: each call has its own count
+`,
   'Arrays': `// Arrays live on the GC heap and are shared, not copied.
 let grid = [[1, 2, 3], [4, 5, 6]];
 let row = grid[1];

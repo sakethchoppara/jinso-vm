@@ -1,0 +1,15 @@
+// v2: closures capture variables, not values
+fn make_counter() {
+  let count = 0;
+  fn next() {
+    count = count + 1;
+    return count;
+  }
+  return next;
+}
+
+let a = make_counter();
+let b = make_counter();
+print a();   // 1
+print a();   // 2
+print b();   // 1: each call to make_counter has its own count

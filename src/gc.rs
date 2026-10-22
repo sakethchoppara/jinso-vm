@@ -3,7 +3,7 @@ use crate::value::Value;
 /// First collection happens once this many bytes are live; the threshold then doubles.
 const INITIAL_THRESHOLD: usize = 1 << 20;
 
-/// Mark-and-sweep heap of strings and arrays. Values refer to objects by index, so there
+/// Mark-and-sweep heap of strings, arrays, closures and upvalues. Values refer to objects by index, so there
 /// are no raw pointers: a GC bug shows up as a "dangling handle" panic instead of memory
 /// corruption.
 ///
@@ -32,6 +32,16 @@ struct Obj {
 enum Kind {
     Str(String),
     Array(Vec<Value>),
+    Closure { func: u16, upvalues: Vec<u32> },
+    Upvalue(Upvalue),
+}
+
+/// A variable captured by a closure. Open while the variable still lives in a stack slot;
+/// closed (holding the value itself) once that slot goes away.
+#[derive(Debug, Clone, Copy)]
+pub enum Upvalue {
+    Open(usize),
+    Closed(Value),
 }
 
 #[derive(Debug)]
@@ -49,6 +59,8 @@ fn size(kind: &Kind) -> usize {
         + match kind {
             Kind::Str(s) => s.capacity(),
             Kind::Array(items) => items.capacity() * std::mem::size_of::<Value>(),
+            Kind::Closure { upvalues, .. } => upvalues.capacity() * 4,
+            Kind::Upvalue(_) => 0,
         }
 }
 
@@ -85,7 +97,7 @@ impl Heap {
     fn buf(&self, h: u32) -> &String {
         match &self.obj(h).kind {
             Kind::Str(s) => s,
-            Kind::Array(_) => unreachable!("string handle points at an array"),
+            _ => unreachable!("string handle points at another kind of object"),
         }
     }
 
@@ -96,14 +108,36 @@ impl Heap {
     pub fn array(&self, h: u32) -> &[Value] {
         match &self.obj(h).kind {
             Kind::Array(items) => items,
-            Kind::Str(_) => unreachable!("array handle points at a string"),
+            _ => unreachable!("array handle points at another kind of object"),
         }
     }
 
     pub fn array_mut(&mut self, h: u32) -> &mut Vec<Value> {
         match &mut self.obj_mut(h).kind {
             Kind::Array(items) => items,
-            Kind::Str(_) => unreachable!("array handle points at a string"),
+            _ => unreachable!("array handle points at another kind of object"),
+        }
+    }
+
+    /// A closure's function index and upvalue handles.
+    pub fn closure(&self, h: u32) -> (u16, &[u32]) {
+        match &self.obj(h).kind {
+            Kind::Closure { func, upvalues } => (*func, upvalues),
+            _ => unreachable!("closure handle points at another kind of object"),
+        }
+    }
+
+    pub fn upvalue(&self, h: u32) -> Upvalue {
+        match &self.obj(h).kind {
+            Kind::Upvalue(u) => *u,
+            _ => unreachable!("upvalue handle points at another kind of object"),
+        }
+    }
+
+    pub fn set_upvalue(&mut self, h: u32, u: Upvalue) {
+        match &mut self.obj_mut(h).kind {
+            Kind::Upvalue(slot) => *slot = u,
+            _ => unreachable!("upvalue handle points at another kind of object"),
         }
     }
 
@@ -145,6 +179,14 @@ impl Heap {
         Value::Array(self.alloc(Kind::Array(items)))
     }
 
+    pub fn alloc_closure(&mut self, func: u16, upvalues: Vec<u32>) -> Value {
+        Value::Closure(self.alloc(Kind::Closure { func, upvalues }))
+    }
+
+    pub fn alloc_upvalue(&mut self, slot: usize) -> u32 {
+        self.alloc(Kind::Upvalue(Upvalue::Open(slot)))
+    }
+
     /// `a + b` without copying `a`, when `a` ends exactly where its buffer does (nothing has
     /// appended past it yet). This makes `s = s + x` in a loop amortized O(len x) rather than
     /// O(len s). Returns None if another value already extended the buffer; then the caller
@@ -167,24 +209,30 @@ impl Heap {
         self.stress || self.bytes > self.next_gc
     }
 
-    /// Mark everything reachable from `roots`, then sweep the rest.
+    /// Mark everything reachable from the `roots` handles, then sweep the rest.
     ///
     /// Marking uses an explicit work stack instead of recursion, so an array nested a
     /// million deep can't overflow the Rust stack. The mark bit is set when an object is
-    /// first reached, so a cycle (an array containing itself) is traversed once.
-    pub fn collect(&mut self, roots: impl Iterator<Item = Value>) {
+    /// first reached, so a cycle (an array containing itself, a closure whose upvalue
+    /// holds the closure) is traversed once.
+    pub fn collect(&mut self, roots: impl Iterator<Item = u32>) {
         let mut work = std::mem::take(&mut self.work);
-        work.extend(roots.filter_map(Value::handle));
+        work.extend(roots);
         while let Some(h) = work.pop() {
             let obj = self.objects[h as usize].as_mut().expect("dangling handle reached while marking");
             if obj.marked {
                 continue;
             }
             obj.marked = true;
-            if let Kind::Array(items) = &obj.kind {
-                work.extend(items.iter().filter_map(|v| v.handle()));
-                self.peak_work = self.peak_work.max(work.len());
+            match &obj.kind {
+                Kind::Str(_) => {}
+                Kind::Array(items) => work.extend(items.iter().filter_map(|v| v.handle())),
+                Kind::Closure { upvalues, .. } => work.extend(upvalues),
+                // An open upvalue's value is on the stack, which is already a root.
+                Kind::Upvalue(Upvalue::Open(_)) => {}
+                Kind::Upvalue(Upvalue::Closed(v)) => work.extend(v.handle()),
             }
+            self.peak_work = self.peak_work.max(work.len());
         }
         self.work = work;
 

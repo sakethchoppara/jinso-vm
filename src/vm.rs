@@ -1,5 +1,6 @@
 use crate::chunk::{Chunk, Op};
-use crate::gc::{Heap, Stats};
+use crate::gc::{Heap, Stats, Upvalue};
+use crate::upvalues::OpenUpvalues;
 use crate::value::Value;
 use std::fmt::Write as _;
 use std::io::Write;
@@ -54,6 +55,7 @@ fn show(s: &mut String, chunk: &Chunk, heap: &Heap, v: Value, path: &mut Vec<u32
         Value::Str { h, len } if path.is_empty() => s.push_str(heap.get(h, len)),
         Value::Str { h, len } => write!(s, "{:?}", heap.get(h, len)).unwrap(),
         Value::Array(h) if path.contains(&h) || path.len() >= MAX_PRINT_DEPTH => s.push_str("[...]"),
+        Value::Closure(h) => s.push_str(&chunk.show(Value::Fn(heap.closure(h).0))),
         Value::Array(h) => {
             path.push(h);
             s.push('[');
@@ -75,7 +77,8 @@ const MAX_FRAMES: usize = 4096;
 
 struct Frame {
     return_ip: usize,
-    base: usize, // caller's base, restored on return
+    base: usize,             // caller's base, restored on return
+    closure: Option<u32>,    // caller's closure, restored on return
 }
 
 /// Fetch-decode-execute loop. User errors come back as `Err("line N: ...")`; the VM
@@ -83,8 +86,9 @@ struct Frame {
 /// (every pop has a matching push), so hitting one is a compiler bug.
 ///
 /// GC roots are the value stack (which also holds every frame's arguments and locals,
-/// since frames only store ip and base), the globals, and the constant pool. Marking
-/// follows array elements from there.
+/// and each frame's callee, so every running closure), the globals, the constant pool and
+/// the open upvalues. Marking follows array elements, closures' upvalues and closed
+/// upvalues' values from there.
 pub fn run(chunk: &Chunk, out: &mut impl Write, gc_stress: bool) -> Result<Stats, String> {
     let mut heap = Heap::new(&chunk.strings, gc_stress);
     let mut stack: Vec<Value> = Vec::with_capacity(256);
@@ -97,6 +101,10 @@ pub fn run(chunk: &Chunk, out: &mut impl Write, gc_stress: bool) -> Result<Stats
     let mut ip = 0;
     // Stack index of the current function's slot 0 (its first argument); 0 at top level.
     let mut base = 0;
+    // The running closure, whose upvalues GetUpvalue/SetUpvalue use. None at top level and
+    // in functions that capture nothing.
+    let mut closure: Option<u32> = None;
+    let mut open = OpenUpvalues::default();
 
     while ip < chunk.code.len() {
         let at = ip;
@@ -110,7 +118,8 @@ pub fn run(chunk: &Chunk, out: &mut impl Write, gc_stress: bool) -> Result<Stats
         macro_rules! maybe_collect {
             () => {
                 if heap.should_collect() {
-                    heap.collect(stack.iter().chain(globals.iter().flatten()).chain(&chunk.constants).copied());
+                    let values = stack.iter().chain(globals.iter().flatten()).chain(&chunk.constants);
+                    heap.collect(values.filter_map(|v| v.handle()).chain(open.handles()));
                 }
             };
         }
@@ -157,23 +166,25 @@ pub fn run(chunk: &Chunk, out: &mut impl Write, gc_stress: bool) -> Result<Stats
             }
             // Stack before: [.. callee arg0 .. argN-1]. The new frame's base points at arg0,
             // so parameters are simply its first locals.
-            Op::Call if matches!(stack[stack.len() - 1 - arg()], Value::Native(_)) => {
-                let argc = arg();
-                let Value::Native(n) = stack[stack.len() - 1 - argc] else { unreachable!() };
-                let (name, arity, f) = NATIVES[n as usize];
-                if argc != arity {
-                    return Err(err(format!("{name}() takes {arity} argument(s), got {argc}")));
-                }
-                let args_at = stack.len() - argc;
-                let v = f(&mut heap, &stack[args_at..]).map_err(err)?;
-                stack.truncate(args_at - 1);
-                stack.push(v);
-            }
             Op::Call => {
                 let argc = arg();
                 let callee = stack[stack.len() - 1 - argc];
-                let Value::Fn(f) = callee else {
-                    return Err(err(format!("can only call functions, got {}", callee.type_name())));
+                let (f, callee_closure) = match callee {
+                    Value::Fn(f) => (f, None),
+                    Value::Closure(h) => (heap.closure(h).0, Some(h)),
+                    // Built-ins run right here and leave their result in the callee's slot.
+                    Value::Native(n) => {
+                        let (name, arity, native) = NATIVES[n as usize];
+                        if argc != arity {
+                            return Err(err(format!("{name}() takes {arity} argument(s), got {argc}")));
+                        }
+                        let args_at = stack.len() - argc;
+                        let v = native(&mut heap, &stack[args_at..]).map_err(err)?;
+                        stack.truncate(args_at - 1);
+                        stack.push(v);
+                        continue;
+                    }
+                    _ => return Err(err(format!("can only call functions, got {}", callee.type_name()))),
                 };
                 let info = &chunk.functions[f as usize];
                 if argc != info.arity as usize {
@@ -182,18 +193,56 @@ pub fn run(chunk: &Chunk, out: &mut impl Write, gc_stress: bool) -> Result<Stats
                 if frames.len() == MAX_FRAMES {
                     return Err(err(format!("stack overflow (more than {MAX_FRAMES} nested calls)")));
                 }
-                frames.push(Frame { return_ip: ip, base });
+                frames.push(Frame { return_ip: ip, base, closure });
                 base = stack.len() - argc;
+                closure = callee_closure;
                 ip = info.offset;
+            }
+            // Capture each variable the function's descriptors name: a slot of this frame
+            // (shared with any other closure that captured it) or one of our own upvalues.
+            Op::Closure => {
+                maybe_collect!(); // before allocating, while nothing new is unrooted
+                let f = arg();
+                let mut ups = Vec::with_capacity(chunk.functions[f].upvalues.len());
+                for u in &chunk.functions[f].upvalues {
+                    ups.push(match u.is_local {
+                        true => open.capture(&mut heap, base + u.index as usize),
+                        false => heap.closure(closure.unwrap()).1[u.index as usize],
+                    });
+                }
+                stack.push(heap.alloc_closure(f as u16, ups));
+            }
+            Op::GetUpvalue => {
+                let u = heap.closure(closure.unwrap()).1[arg()];
+                stack.push(match heap.upvalue(u) {
+                    Upvalue::Open(slot) => stack[slot],
+                    Upvalue::Closed(v) => v,
+                });
+            }
+            Op::SetUpvalue => {
+                let v = stack.pop().unwrap();
+                let u = heap.closure(closure.unwrap()).1[arg()];
+                match heap.upvalue(u) {
+                    Upvalue::Open(slot) => stack[slot] = v,
+                    Upvalue::Closed(_) => heap.set_upvalue(u, Upvalue::Closed(v)),
+                }
+            }
+            // A captured local's block is ending: move its value into the upvalue, then pop.
+            Op::CloseUpvalue => {
+                open.close(&mut heap, &stack, stack.len() - 1);
+                stack.pop();
             }
             // Drop the callee, args and locals in one go, then leave the return value in the callee's place.
             Op::Return => {
                 let v = stack.pop().unwrap();
+                // Closures that outlive this call keep the captured values.
+                open.close(&mut heap, &stack, base);
                 stack.truncate(base - 1);
                 stack.push(v);
                 let frame = frames.pop().unwrap();
                 ip = frame.return_ip;
                 base = frame.base;
+                closure = frame.closure;
             }
             Op::Add if matches!(stack[stack.len() - 2..], [Value::Str { .. }, Value::Str { .. }]) => {
                 let Some(Value::Str { h: bh, len: blen }) = stack.pop() else { unreachable!() };

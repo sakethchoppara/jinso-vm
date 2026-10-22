@@ -25,6 +25,10 @@ opcodes! {
     Loop,         // u16 backward offset
     Pop,
     Call,         // u16 argument count; callee and args are on the stack
+    Closure,      // u16 function index; captures per that function's upvalue descriptors
+    GetUpvalue,   // u16 index into the running closure's upvalues
+    SetUpvalue,   // u16 index into the running closure's upvalues
+    CloseUpvalue, // closes upvalues pointing at the top slot, then pops it
     MakeArray,    // u16 element count; elements are on the stack
     Index,        // target index -> element
     SetIndex,     // target index value ->
@@ -56,6 +60,9 @@ impl Op {
             | Op::JumpIfFalse
             | Op::Loop
             | Op::Call
+            | Op::Closure
+            | Op::GetUpvalue
+            | Op::SetUpvalue
             | Op::MakeArray => 2,
             _ => 0,
         }
@@ -69,6 +76,17 @@ pub struct FnInfo {
     pub name: String,
     pub arity: u8,
     pub offset: usize, // where the body's bytecode starts
+    pub end: usize,    // one past the body's last byte
+    pub upvalues: Vec<UpvalueDesc>,
+}
+
+/// How a closure finds one captured variable when it is created.
+pub struct UpvalueDesc {
+    /// true: a local of the enclosing function (stack slot `index` of its frame).
+    /// false: upvalue `index` of the enclosing closure.
+    pub is_local: bool,
+    pub index: u16,
+    pub name: String,
 }
 
 #[derive(Default)]

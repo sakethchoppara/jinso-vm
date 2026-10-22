@@ -160,7 +160,6 @@ fn syntax_errors() {
         ("while true print 1;", "expected '{'"),
         ("if true { print 1; ", "expected '}'"),
         ("return 1;", "line 1: return outside function"),
-        ("if true { fn f() { } }", "functions can only be declared at top level"),
         ("fn f(a, a) { }", "duplicate parameter 'a'"),
         ("fn f(a b) { }", "expected ')'"),
         ("print f(1,);", "expected expression"),
@@ -384,4 +383,95 @@ fn marking_deep_nesting_uses_no_recursion() {
     assert_eq!(out, "1\n[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[...]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]\n");
     assert!(stats.collections >= 1, "{stats:?}");
     assert!(stats.peak_work <= 4, "{stats:?}");
+}
+
+// ---- v2: closures ----
+
+const COUNTER: &str = "fn make_counter() {
+  let count = 0;
+  fn next() {
+    count = count + 1;
+    return count;
+  }
+  return next;
+}
+";
+
+#[test]
+fn closures() {
+    let counter = |rest: &str| format!("{COUNTER}{rest}");
+    for (src, want) in [
+        // the PRD's examples: a closure outlives its call, and each call gets fresh variables
+        (counter("let c = make_counter(); print c(); print c();"), "1\n2\n"),
+        (counter("let a = make_counter(); let b = make_counter(); print a(); print a(); print b(); print a();"), "1\n2\n1\n3\n"),
+        (counter("let a = make_counter(); let b = make_counter(); print a == b; print a == a; print a;"), "false\ntrue\n<fn next>\n"),
+        // capturing a parameter
+        ("fn adder(n) { fn add(x) { return x + n; } return add; } let add5 = adder(5); print add5(10); print adder(1)(1);".into(), "15\n2\n"),
+        // two and three levels of nesting
+        ("fn outer() { let x = \"x\"; fn middle() { fn inner() { return x + \"!\"; } return inner; } return middle; } print outer()()();".into(), "x!\n"),
+        ("fn a() {
+            let n = 0;
+            fn b() { fn c() { fn d() { n = n + 1; return n; } return d; } return c; }
+            let d = b()();
+            d(); d();
+            return [n, d()];
+          }
+          print a();".into(), "[2, 3]\n"),
+        // one variable seen at three levels, written at two
+        ("fn a() { let x = 1; fn b() { x = x + 10; fn c() { x = x + 100; return x; } return c; } let c = b(); return [c(), x]; } print a();".into(), "[111, 111]\n"),
+        // two closures share one variable
+        ("fn pair() { let v = 0; fn get() { return v; } fn set(x) { v = x; } return [get, set]; } let p = pair(); p[1](42); print p[0]();".into(), "42\n"),
+        // an open upvalue sees later writes to the variable, and the enclosing function sees the closure's writes
+        ("fn f() { let x = 1; fn g() { return x; } x = 2; return g; } print f()();".into(), "2\n"),
+        ("fn f() { let x = 1; fn inc() { x = x + 1; } inc(); inc(); return x; } print f();".into(), "3\n"),
+        ("fn f() { let x = 1; fn g() { return x + x + x; } return g(); } print f();".into(), "3\n"),
+        // a block local declared inside a loop is a fresh variable each iteration...
+        ("let fs = []; let i = 0; while i < 3 { let j = i; fn f() { return j; } push(fs, f); i = i + 1; } print [fs[0](), fs[1](), fs[2]()];".into(), "[0, 1, 2]\n"),
+        // ...but a variable declared outside the loop is shared by every closure
+        ("fn f() { let fs = []; let i = 0; while i < 3 { fn g() { return i; } push(fs, g); i = i + 1; } return [fs[0](), fs[2]()]; } print f();".into(), "[3, 3]\n"),
+        // a closure capturing a block local outlives the block
+        ("fn f() { let g = nil; if true { let x = \"block\"; fn h() { return x; } g = h; } let y = \"after\"; return g; } print f()();".into(), "block\n"),
+        // nested functions without captures, and recursion through a nested function's own name
+        ("fn outer() { fn sq(x) { return x * x; } return sq(4); } print outer();".into(), "16\n"),
+        ("fn outer() { fn fact(n) { if n <= 1 { return 1; } return n * fact(n - 1); } return fact(5); } print outer();".into(), "120\n"),
+        // a closure whose upvalue holds the closure itself (a cycle through an upvalue)
+        ("fn f() { fn me() { return me; } return me; } let s = f(); print s() == s; print s()()() == s;".into(), "true\ntrue\n"),
+        // heap values in closed upvalues survive collections
+        ("fn make() { let log = []; fn add(s) { push(log, s + \"!\"); return log; } return add; } let add = make(); add(\"a\"); print add(\"b\");".into(),
+         "[\"a!\", \"b!\"]\n"),
+        // GC root: open upvalues. Once g = nil, nothing but the open list refers to x's
+        // upvalue; a collection must keep it, because h captures the same slot later.
+        ("fn f() { let x = \"x\" + \"1\"; fn g() { return x; } g = nil; let junk = \"a\" + \"b\"; fn h() { return x; } return h(); } print f();".into(), "x1\n"),
+        // GC edge: a closed upvalue's value. s is reachable only through get's closed
+        // upvalue when junk is allocated, so marking has to follow it. (An array, not a
+        // string: "a" + "b" appends into the literal "a"'s buffer, which is always rooted
+        // through the constant pool, so it would survive a broken marker anyway.)
+        ("fn make() { let s = [1, 2]; fn get() { let junk = [3]; return s; } return get; } let g = make(); print g();".into(), "[1, 2]\n"),
+        // functions nested in a top-level block are locals of the script, not globals
+        ("if true { let n = 5; fn get() { return n; } print get(); } print 1;".into(), "5\n1\n"),
+    ] {
+        assert_eq!(run(&src).as_deref(), Ok(want), "{src}");
+    }
+}
+
+#[test]
+fn closure_errors() {
+    for (src, want) in [
+        // y is declared after f, so f's `y` is a global and reading it is a clean runtime error
+        ("fn outer() { fn f() { return y; } let y = 1; return f(); }\nouter();", "line 1: undefined variable 'y'"),
+        (&format!("{COUNTER}make_counter()(1);"), "next() takes 0 argument(s), got 1"),
+        ("fn outer() { let k = 1; fn r(n) { return r(n + k); } return r(0); }\nouter();", "line 1: stack overflow"),
+        ("fn f() { return 1; }\nif true { return 2; }", "line 2: return outside function"),
+    ] {
+        let err = run(src).unwrap_err();
+        assert!(err.contains(want), "{src}: got {err:?}");
+    }
+}
+
+#[test]
+fn disassembler_shows_upvalues() {
+    let dis = lumen::disasm::disassemble(&lumen::compile(&format!("{COUNTER}print make_counter()();")).unwrap());
+    for want in ["== fn next ==", "GetUpvalue      0  (count)", "SetUpvalue      0  (count)", "Closure         1  (<fn next>)", "local 0 (count)"] {
+        assert!(dis.contains(want), "missing {want:?} in:\n{dis}");
+    }
 }

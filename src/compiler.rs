@@ -1,11 +1,11 @@
 use crate::ast::{BinOp, Expr, ExprKind, Stmt, UnOp};
-use crate::chunk::{Chunk, FnInfo, Op};
+use crate::chunk::{Chunk, FnInfo, Op, UpvalueDesc};
 use crate::value::Value;
 use std::collections::HashMap;
 
 /// Walks the AST and emits stack-machine bytecode.
 pub fn compile(stmts: &[Stmt]) -> Result<Chunk, String> {
-    let mut c = Compiler { chunk: Chunk::default(), globals: HashMap::new(), locals: Vec::new(), depth: 0, in_fn: false };
+    let mut c = Compiler { chunk: Chunk::default(), globals: HashMap::new(), fns: vec![FnState::default()] };
     for s in stmts {
         c.stmt(s)?;
     }
@@ -15,16 +15,41 @@ pub fn compile(stmts: &[Stmt]) -> Result<Chunk, String> {
 struct Compiler {
     chunk: Chunk,
     globals: HashMap<String, u16>,
-    /// (name, scope depth). A local's index here is its stack slot, relative to the current
-    /// frame's base: statements leave the stack balanced, so between statements the frame
-    /// holds exactly these locals. Inside a function, the parameters are slots 0..arity.
-    locals: Vec<(String, u32)>,
-    /// 0 = top level (variables are globals); each block adds 1.
+    /// One entry per function being compiled, innermost last. Entry 0 is the top-level
+    /// script, whose block locals live at the bottom of the stack (frame base 0).
+    fns: Vec<FnState>,
+}
+
+#[derive(Default)]
+struct FnState {
+    /// A local's index here is its stack slot, relative to the frame's base: statements
+    /// leave the stack balanced, so between statements the frame holds exactly these
+    /// locals. Inside a function, the parameters are slots 0..arity.
+    locals: Vec<Local>,
+    /// 0 = top level of the script (variables are globals); each block adds 1.
     depth: u32,
-    in_fn: bool,
+    upvalues: Vec<UpvalueDesc>,
+}
+
+struct Local {
+    name: String,
+    depth: u32,
+    /// Some closure captures it, so leaving its scope must close the upvalue, not just pop.
+    captured: bool,
+}
+
+/// Where a name lives, decided at compile time.
+enum Var {
+    Local(u16),
+    Upvalue(u16),
+    Global(u16),
 }
 
 impl Compiler {
+    fn cur(&mut self) -> &mut FnState {
+        self.fns.last_mut().unwrap()
+    }
+
     /// Global name -> slot index. A slot is created on first mention, even before its
     /// `let`, so a function can refer to a global defined later; reading it before the
     /// `let` runs is a runtime "undefined variable" error.
@@ -38,12 +63,54 @@ impl Compiler {
         Ok(i)
     }
 
-    /// Innermost local with this name wins (shadowing); otherwise it's a global.
-    fn resolve(&mut self, name: &str) -> Result<(u16, bool), String> {
-        match self.locals.iter().rposition(|(n, _)| n == name) {
-            Some(slot) => Ok((slot as u16, true)),
-            None => Ok((self.global(name)?, false)),
+    /// Innermost local with this name wins (shadowing); then a variable of an enclosing
+    /// function, captured as an upvalue; otherwise it's a global.
+    fn resolve(&mut self, name: &str) -> Result<Var, String> {
+        let f = self.fns.len() - 1;
+        if let Some(slot) = local(&self.fns[f], name) {
+            return Ok(Var::Local(slot));
         }
+        if let Some(i) = self.upvalue(f, name)? {
+            return Ok(Var::Upvalue(i));
+        }
+        Ok(Var::Global(self.global(name)?))
+    }
+
+    /// Finds `name` in the functions enclosing `fns[f]`, adding an upvalue to every
+    /// function between there and `f` so each closure can hand it down to the next.
+    fn upvalue(&mut self, f: usize, name: &str) -> Result<Option<u16>, String> {
+        if f == 0 {
+            return Ok(None); // the script has no enclosing function
+        }
+        let enclosing = f - 1;
+        if let Some(slot) = local(&self.fns[enclosing], name) {
+            self.fns[enclosing].locals[slot as usize].captured = true;
+            return self.add_upvalue(f, true, slot, name).map(Some);
+        }
+        match self.upvalue(enclosing, name)? {
+            Some(i) => self.add_upvalue(f, false, i, name).map(Some),
+            None => Ok(None),
+        }
+    }
+
+    fn add_upvalue(&mut self, f: usize, is_local: bool, index: u16, name: &str) -> Result<u16, String> {
+        let ups = &mut self.fns[f].upvalues;
+        if let Some(i) = ups.iter().position(|u| u.is_local == is_local && u.index == index) {
+            return Ok(i as u16);
+        }
+        let i = u16::try_from(ups.len()).map_err(|_| "too many captured variables".to_string())?;
+        ups.push(UpvalueDesc { is_local, index, name: name.to_string() });
+        Ok(i)
+    }
+
+    fn declare_local(&mut self, name: &str, line: u32) -> Result<(), String> {
+        let f = self.cur();
+        if f.locals.len() > u16::MAX as usize {
+            return Err(format!("line {line}: too many locals"));
+        }
+        let depth = f.depth;
+        f.locals.push(Local { name: name.to_string(), depth, captured: false });
+        Ok(())
     }
 
     fn constant(&mut self, v: Value, line: u32) -> Result<(), String> {
@@ -54,14 +121,15 @@ impl Compiler {
     }
 
     fn block(&mut self, stmts: &[Stmt], line: u32) -> Result<(), String> {
-        self.depth += 1;
+        self.cur().depth += 1;
         for s in stmts {
             self.stmt(s)?;
         }
-        self.depth -= 1;
-        while self.locals.last().is_some_and(|(_, d)| *d > self.depth) {
-            self.locals.pop();
-            self.chunk.emit(Op::Pop, line);
+        let f = self.fns.last_mut().unwrap();
+        f.depth -= 1;
+        while f.locals.last().is_some_and(|l| l.depth > f.depth) {
+            let local = f.locals.pop().unwrap();
+            self.chunk.emit(if local.captured { Op::CloseUpvalue } else { Op::Pop }, line);
         }
         Ok(())
     }
@@ -70,22 +138,23 @@ impl Compiler {
         match s {
             Stmt::Let { name, init, line } => {
                 self.expr(init)?;
-                if self.depth == 0 {
+                if self.fns.len() == 1 && self.cur().depth == 0 {
                     let i = self.global(name)?;
                     self.chunk.emit_arg(Op::DefineGlobal, i, *line);
                 } else {
                     // The initializer's value is already on the stack, in exactly the slot
                     // this local gets, so declaring it emits no code.
-                    if self.locals.len() > u16::MAX as usize {
-                        return Err(format!("line {line}: too many locals"));
-                    }
-                    self.locals.push((name.clone(), self.depth));
+                    self.declare_local(name, *line)?;
                 }
             }
             Stmt::Assign { name, value, line } => {
                 self.expr(value)?;
-                let (i, local) = self.resolve(name)?;
-                self.chunk.emit_arg(if local { Op::SetLocal } else { Op::SetGlobal }, i, *line);
+                let (op, i) = match self.resolve(name)? {
+                    Var::Local(i) => (Op::SetLocal, i),
+                    Var::Upvalue(i) => (Op::SetUpvalue, i),
+                    Var::Global(i) => (Op::SetGlobal, i),
+                };
+                self.chunk.emit_arg(op, i, *line);
             }
             Stmt::IndexAssign { target, index, value, line } => {
                 self.expr(target)?;
@@ -97,42 +166,52 @@ impl Compiler {
                 self.expr(e)?;
                 self.chunk.emit(Op::Print, e.line);
             }
-            // Jump over; body...; Nil; Return; over: Constant <fn>; DefineGlobal name
+            // Jump over; body...; Nil; Return; over: (Constant <fn> | Closure f); bind name
             Stmt::Fn { name, params, body, line } => {
-                if self.depth > 0 {
-                    return Err(format!("line {line}: functions can only be declared at top level"));
+                let global = self.fns.len() == 1 && self.cur().depth == 0;
+                if !global {
+                    // Declared before the body, so the body can call itself by name. Its
+                    // slot gets filled when the Constant or Closure below runs.
+                    self.declare_local(name, *line)?;
                 }
                 let over = self.chunk.emit_jump(Op::Jump, *line);
                 let idx = u16::try_from(self.chunk.functions.len()).map_err(|_| "too many functions".to_string())?;
                 let offset = self.chunk.code.len();
-                self.chunk.functions.push(FnInfo { name: name.clone(), arity: params.len() as u8, offset });
+                self.chunk.functions.push(FnInfo { name: name.clone(), arity: params.len() as u8, offset, end: 0, upvalues: Vec::new() });
 
-                // Top level has no locals, so the function's locals start empty.
-                self.depth = 1;
-                self.in_fn = true;
+                self.fns.push(FnState { depth: 1, ..FnState::default() });
                 for p in params {
-                    if self.locals.iter().any(|(n, _)| n == p) {
+                    if local(&self.fns[self.fns.len() - 1], p).is_some() {
                         return Err(format!("line {line}: duplicate parameter '{p}'"));
                     }
-                    self.locals.push((p.clone(), 1));
+                    self.declare_local(p, *line)?;
                 }
                 for s in body {
                     self.stmt(s)?;
                 }
-                // Implicit `return nil;`. Return discards the frame, so no Pops are needed.
+                // Implicit `return nil;`. Return closes upvalues and discards the frame,
+                // so no Pops or CloseUpvalues are needed.
                 self.constant(Value::Nil, *line)?;
                 self.chunk.emit(Op::Return, *line);
-                self.locals.clear();
-                self.depth = 0;
-                self.in_fn = false;
+                let state = self.fns.pop().unwrap();
 
+                let info = &mut self.chunk.functions[idx as usize];
+                info.end = self.chunk.code.len();
+                info.upvalues = state.upvalues;
                 self.chunk.patch_jump(over)?;
-                self.constant(Value::Fn(idx), *line)?;
-                let g = self.global(name)?;
-                self.chunk.emit_arg(Op::DefineGlobal, g, *line);
+                // A function that captures nothing needs no closure object.
+                if self.chunk.functions[idx as usize].upvalues.is_empty() {
+                    self.constant(Value::Fn(idx), *line)?;
+                } else {
+                    self.chunk.emit_arg(Op::Closure, idx, *line);
+                }
+                if global {
+                    let g = self.global(name)?;
+                    self.chunk.emit_arg(Op::DefineGlobal, g, *line);
+                }
             }
             Stmt::Return { value, line } => {
-                if !self.in_fn {
+                if self.fns.len() == 1 {
                     return Err(format!("line {line}: return outside function"));
                 }
                 self.expr(value)?;
@@ -182,8 +261,12 @@ impl Compiler {
                 self.constant(Value::Str { h, len }, line)?;
             }
             ExprKind::Var(name) => {
-                let (i, local) = self.resolve(name)?;
-                self.chunk.emit_arg(if local { Op::GetLocal } else { Op::GetGlobal }, i, line);
+                let (op, i) = match self.resolve(name)? {
+                    Var::Local(i) => (Op::GetLocal, i),
+                    Var::Upvalue(i) => (Op::GetUpvalue, i),
+                    Var::Global(i) => (Op::GetGlobal, i),
+                };
+                self.chunk.emit_arg(op, i, line);
             }
             ExprKind::Call(callee, args) => {
                 self.expr(callee)?;
@@ -255,4 +338,8 @@ impl Compiler {
         }
         Ok(())
     }
+}
+
+fn local(f: &FnState, name: &str) -> Option<u16> {
+    f.locals.iter().rposition(|l| l.name == name).map(|i| i as u16)
 }
