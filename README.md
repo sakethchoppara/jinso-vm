@@ -450,8 +450,9 @@ short view keeps its whole buffer alive.
   assertions on, at both `-O0` and `-O1`; any difference between them fails the run. Programs run under a step budget (`vm::run_limited`, which counts loop iterations and
   calls), because a mutated `fib(9223372036854775807)` is a valid program that would run for
   longer than the universe has existed. An earlier 10-minute run sat on one such input for
-  minutes, which looked like a hang. A 10-minute run (1,388,256 inputs) finds no panics,
-  and CI runs one minute of it on every push.
+  minutes, which looked like a hang. The latest 10-minute run checked 6,014,556 inputs at
+  both levels: no panics, and no difference between `-O0` and `-O1`. CI runs one minute of
+  it on every push.
 - **Deep nesting**: the parser caps nesting at 128 levels, so input like 100,000 `(`s, a
   100,000-term `1 + 1 + …` or a 100,000-long `a[0][0]…` is an error, not a Rust stack
   overflow.
