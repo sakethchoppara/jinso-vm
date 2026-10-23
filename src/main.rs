@@ -2,6 +2,7 @@ use jinso::optimize::Passes;
 use std::process::exit;
 
 const USAGE: &str = "usage: jinso <run|dis|ast> [options] <file.jo>
+       jinso repl [-O0] [--gc-stress]
   -O1          optimize (the default)
   -O0          don't optimize
   --gc-stress  collect garbage before every allocation
@@ -33,6 +34,14 @@ fn main() {
             f if f.starts_with('-') => usage(&format!("unknown flag {f}\n")),
             _ => args.push(a),
         }
+    }
+    if args.first().map(String::as_str) == Some("repl") {
+        let stdin = std::io::stdin().lock();
+        jinso::repl::run(stdin, &mut std::io::stdout().lock(), gc_stress, passes).unwrap_or_else(|e| {
+            eprintln!("{e}");
+            exit(1);
+        });
+        return;
     }
     let (Some(cmd), Some(path)) = (args.first(), args.get(1)) else { usage("") };
     let src = std::fs::read_to_string(path).unwrap_or_else(|e| {

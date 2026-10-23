@@ -1,11 +1,33 @@
 use crate::ast::{BinOp, Expr, ExprKind, Stmt, UnOp};
 use crate::lexer::{Tok, Token};
 
+/// Every syntax error in a program, in order.
+#[derive(Debug)]
+pub struct SyntaxErrors {
+    pub messages: Vec<String>,
+    /// The first error was hitting the end of the input (`if x {`, `print 1 +`): the
+    /// program isn't wrong so much as unfinished. The REPL reads another line when it sees
+    /// this, instead of counting braces itself (which a `{` inside a string would fool).
+    pub incomplete: bool,
+}
+
+/// One syntax error, and whether it happened at the end of the input.
+struct Error {
+    message: String,
+    at_end: bool,
+}
+
 /// Parses the whole program, collecting every syntax error instead of stopping at the first.
-pub fn parse(toks: Vec<Token>) -> Result<Vec<Stmt>, Vec<String>> {
+pub fn parse(toks: Vec<Token>) -> Result<Vec<Stmt>, SyntaxErrors> {
     let mut p = Parser { toks, pos: 0, errors: Vec::new(), depth: 0 };
     let stmts = p.stmts_until(Tok::Eof);
-    if p.errors.is_empty() { Ok(stmts) } else { Err(p.errors) }
+    match p.errors.first() {
+        None => Ok(stmts),
+        Some(first) => Err(SyntaxErrors {
+            incomplete: first.at_end,
+            messages: p.errors.into_iter().map(|e| e.message).collect(),
+        }),
+    }
 }
 
 /// Bounds AST depth, so recursion in the parser, compiler and AST drop can't overflow
@@ -15,7 +37,7 @@ const MAX_DEPTH: usize = 128;
 struct Parser {
     toks: Vec<Token>,
     pos: usize,
-    errors: Vec<String>,
+    errors: Vec<Error>,
     depth: usize,
 }
 
@@ -56,12 +78,12 @@ impl Parser {
         t
     }
 
-    fn error(&self, msg: &str) -> String {
+    fn error(&self, msg: &str) -> Error {
         let t = &self.toks[self.pos];
-        format!("{}:{}: {msg}, got {}", t.line, t.col, t.tok)
+        Error { message: format!("{}:{}: {msg}, got {}", t.line, t.col, t.tok), at_end: t.tok == Tok::Eof }
     }
 
-    fn expect(&mut self, want: Tok, what: &str) -> Result<(), String> {
+    fn expect(&mut self, want: Tok, what: &str) -> Result<(), Error> {
         if *self.peek() == want {
             self.advance();
             Ok(())
@@ -70,7 +92,7 @@ impl Parser {
         }
     }
 
-    fn ident(&mut self) -> Result<String, String> {
+    fn ident(&mut self) -> Result<String, Error> {
         match self.peek() {
             Tok::Ident(_) => match self.advance() {
                 Tok::Ident(name) => Ok(name),
@@ -119,7 +141,7 @@ impl Parser {
     }
 
     /// Runs `f` one nesting level deeper; the depth is restored even when `f` fails.
-    fn nested<T>(&mut self, f: impl FnOnce(&mut Self) -> Result<T, String>) -> Result<T, String> {
+    fn nested<T>(&mut self, f: impl FnOnce(&mut Self) -> Result<T, Error>) -> Result<T, Error> {
         if self.depth >= MAX_DEPTH {
             return Err(self.error(&format!("nesting too deep (max {MAX_DEPTH})")));
         }
@@ -130,18 +152,18 @@ impl Parser {
         r
     }
 
-    fn block(&mut self) -> Result<Vec<Stmt>, String> {
+    fn block(&mut self) -> Result<Vec<Stmt>, Error> {
         self.expect(Tok::LBrace, "'{'")?;
         let stmts = self.stmts_until(Tok::RBrace);
         self.expect(Tok::RBrace, "'}'")?;
         Ok(stmts)
     }
 
-    fn stmt(&mut self) -> Result<Stmt, String> {
+    fn stmt(&mut self) -> Result<Stmt, Error> {
         self.nested(Self::stmt_inner)
     }
 
-    fn stmt_inner(&mut self) -> Result<Stmt, String> {
+    fn stmt_inner(&mut self) -> Result<Stmt, Error> {
         let line = self.line();
         let s = match self.peek() {
             Tok::If => {
@@ -181,7 +203,10 @@ impl Parser {
                     Stmt::Expr(e)
                 } else {
                     let t = &self.toks[self.pos];
-                    let bad = format!("{}:{}: can only assign to a variable or an array element", t.line, t.col);
+                    let bad = Error {
+                        message: format!("{}:{}: can only assign to a variable or an array element", t.line, t.col),
+                        at_end: false,
+                    };
                     self.advance();
                     let value = self.expr(1)?;
                     match e.kind {
@@ -197,7 +222,7 @@ impl Parser {
     }
 
     /// `open item, item, ... close`, at most 255 items (arity and argc fit in a byte).
-    fn list<T>(&mut self, open: Tok, close: Tok, mut item: impl FnMut(&mut Self) -> Result<T, String>) -> Result<Vec<T>, String> {
+    fn list<T>(&mut self, open: Tok, close: Tok, mut item: impl FnMut(&mut Self) -> Result<T, Error>) -> Result<Vec<T>, Error> {
         let (open_s, close_s) = (format!("{open}"), format!("{close}"));
         self.expect(open, &open_s)?;
         let mut items = Vec::new();
@@ -218,11 +243,11 @@ impl Parser {
     }
 
     /// After `if`: cond block [else (block | if ...)]
-    fn if_rest(&mut self, line: u32) -> Result<Stmt, String> {
+    fn if_rest(&mut self, line: u32) -> Result<Stmt, Error> {
         self.nested(|p| p.if_rest_inner(line))
     }
 
-    fn if_rest_inner(&mut self, line: u32) -> Result<Stmt, String> {
+    fn if_rest_inner(&mut self, line: u32) -> Result<Stmt, Error> {
         let cond = self.expr(1)?;
         let then = self.block()?;
         let els = if *self.peek() != Tok::Else {
@@ -242,7 +267,7 @@ impl Parser {
 
     /// Precedence climbing: only consume operators binding at least as tightly as `min`.
     /// Recursing with `p + 1` makes same-precedence operators left-associative.
-    fn expr(&mut self, min: u8) -> Result<Expr, String> {
+    fn expr(&mut self, min: u8) -> Result<Expr, Error> {
         let saved = self.depth;
         let r = self.expr_inner(min);
         self.depth = saved;
@@ -250,7 +275,7 @@ impl Parser {
     }
 
     /// Each operator in a chain like `1+1+1` deepens the (left-leaning) tree, so it counts as nesting.
-    fn expr_inner(&mut self, min: u8) -> Result<Expr, String> {
+    fn expr_inner(&mut self, min: u8) -> Result<Expr, Error> {
         let mut lhs = self.unary()?;
         while let Some((p, op)) = infix(self.peek()) {
             if p < min {
@@ -268,11 +293,11 @@ impl Parser {
         Ok(lhs)
     }
 
-    fn unary(&mut self) -> Result<Expr, String> {
+    fn unary(&mut self) -> Result<Expr, Error> {
         self.nested(Self::unary_inner)
     }
 
-    fn unary_inner(&mut self) -> Result<Expr, String> {
+    fn unary_inner(&mut self) -> Result<Expr, Error> {
         let line = self.line();
         let kind = match self.peek() {
             Tok::Minus => {
@@ -292,7 +317,7 @@ impl Parser {
 
     /// primary followed by any number of `(args)` and `[index]`, so `f(1)(2)` and
     /// `m[1][0]` parse. Each one deepens the tree, so it counts as nesting.
-    fn call(&mut self) -> Result<Expr, String> {
+    fn call(&mut self) -> Result<Expr, Error> {
         let mut e = self.primary()?;
         while matches!(self.peek(), Tok::LParen | Tok::LBracket) {
             if self.depth >= MAX_DEPTH {
@@ -313,7 +338,7 @@ impl Parser {
         Ok(e)
     }
 
-    fn primary(&mut self) -> Result<Expr, String> {
+    fn primary(&mut self) -> Result<Expr, Error> {
         let line = self.line();
         let kind = match self.peek() {
             Tok::Int(n) => {

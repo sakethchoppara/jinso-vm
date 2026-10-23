@@ -13,7 +13,8 @@ root=$PWD
 
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
-cp -r Cargo.toml Cargo.lock src tests "$work"/
+# examples/ and bench/ too: some tests read every program in them.
+cp -r Cargo.toml Cargo.lock src tests examples bench "$work"/
 # A separate target dir: builds are reused between mutants and never touch target/release.
 export CARGO_TARGET_DIR="$root/target/root-removal"
 
@@ -25,7 +26,8 @@ for patch in scripts/mutants/*.patch; do
     status=1
     continue
   fi
-  if out=$(cd "$work" && cargo test -q 2>&1); then
+  # --no-fail-fast: run every test file, so the report lists every test that catches the bug
+  if out=$(cd "$work" && cargo test -q --no-fail-fast 2>&1); then
     echo "MISSED   $name: every test passed with this bug in place"
     status=1
   elif grep -q "could not compile" <<< "$out"; then

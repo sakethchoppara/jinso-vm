@@ -1,13 +1,11 @@
-diff --git a/src/vm.rs b/src/vm.rs
-index 42b9427..b2ad77f 100644
 --- a/src/vm.rs
 +++ b/src/vm.rs
-@@ -154,7 +154,7 @@ pub fn run_limited(chunk: &Chunk, out: &mut impl Write, gc_stress: bool, steps:
-             () => {
-                 if heap.should_collect() {
-                     let values = stack.iter().chain(globals.iter().flatten()).chain(&chunk.constants);
--                    heap.collect(values.filter_map(|v| v.handle()).chain(open.handles()));
-+                    heap.collect(values.filter_map(|v| v.handle()));
-                 }
-             };
-         }
+@@ -237,7 +237,7 @@
+                 () => {
+                     if heap.should_collect() {
+                         let values = stack.iter().chain(globals.iter().flatten()).chain(constants.iter());
+-                        heap.collect(values.filter_map(|v| v.handle()).chain(open.handles()));
++                        heap.collect(values.filter_map(|v| v.handle()));
+                     }
+                 };
+             }

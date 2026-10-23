@@ -3,9 +3,15 @@ use std::fmt::Write;
 
 /// One instruction per line: byte offset, source line ("|" if same as previous), opcode, operand.
 pub fn disassemble(chunk: &Chunk) -> String {
+    disassemble_range(chunk, 0, chunk.code.len())
+}
+
+/// The listing of the bytes from `from` (an instruction boundary) up to `to`: the REPL's
+/// `:dis` shows just the last input's code this way.
+pub fn disassemble_range(chunk: &Chunk, from: usize, to: usize) -> String {
     let mut s = String::new();
-    let mut ip = 0;
-    while ip < chunk.code.len() {
+    let mut ip = from;
+    while ip < to {
         let op = Op::ALL[chunk.code[ip] as usize];
         if let Some(f) = chunk.functions.iter().find(|f| f.offset == ip) {
             writeln!(s, "== fn {} ==", f.name).unwrap();
@@ -13,7 +19,7 @@ pub fn disassemble(chunk: &Chunk) -> String {
         // Innermost function whose body contains ip, for naming upvalues.
         let inside = chunk.functions.iter().filter(|f| f.offset <= ip && ip < f.end).max_by_key(|f| f.offset);
         let line = chunk.lines[ip];
-        if ip > 0 && chunk.lines[ip - 1] == line {
+        if ip > from && chunk.lines[ip - 1] == line {
             write!(s, "{ip:04}    | ").unwrap();
         } else {
             write!(s, "{ip:04} {line:4} ").unwrap();

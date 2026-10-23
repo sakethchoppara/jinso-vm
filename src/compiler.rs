@@ -4,36 +4,87 @@ use crate::optimize::{FnLabels, Item, Label, Passes, optimize, relocate};
 use crate::value::Value;
 use std::collections::HashMap;
 
-/// Walks the AST and emits stack-machine bytecode: first as an instruction list with
-/// symbolic jump labels, then optimized with `passes`, then laid out by `relocate`.
+/// Compiles a whole program in one go.
 pub fn compile(stmts: &[Stmt], passes: Passes) -> Result<Chunk, String> {
-    let mut c = Compiler {
-        chunk: Chunk::default(),
-        globals: HashMap::new(),
-        fns: vec![FnState::default()],
-        items: Vec::new(),
-        next_label: 0,
-        fn_labels: Vec::new(),
-    };
-    for s in stmts {
-        c.stmt(s)?;
-    }
-    let entries: Vec<Label> = c.fn_labels.iter().map(|f| f.start).collect();
-    optimize(&mut c.items, &mut c.chunk.constants, &entries, passes);
-    relocate(&c.items, &c.fn_labels, &mut c.chunk)?;
+    let mut c = Compiler::new();
+    c.add(stmts, passes)?;
     Ok(c.chunk)
 }
 
-struct Compiler {
+/// Walks the AST and emits stack-machine bytecode: first as an instruction list with
+/// symbolic jump labels, then optimized with `passes`, then laid out by `relocate`.
+///
+/// A `Compiler` can take a program in pieces (`add`), each appended to the same chunk, so
+/// the REPL keeps one: global slots, functions and constants from earlier inputs stay valid.
+pub struct Compiler {
     chunk: Chunk,
     globals: HashMap<String, u16>,
     /// One entry per function being compiled, innermost last. Entry 0 is the top-level
     /// script, whose block locals live at the bottom of the stack (frame base 0).
     fns: Vec<FnState>,
-    /// The program so far, with jumps pointing at labels.
+    /// The piece being compiled, with jumps pointing at labels.
     items: Vec<Item>,
     next_label: Label,
     fn_labels: Vec<FnLabels>,
+}
+
+impl Default for Compiler {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Compiler {
+    pub fn new() -> Compiler {
+        Compiler {
+            chunk: Chunk::default(),
+            globals: HashMap::new(),
+            fns: vec![FnState::default()],
+            items: Vec::new(),
+            next_label: 0,
+            fn_labels: Vec::new(),
+        }
+    }
+
+    pub fn chunk(&self) -> &Chunk {
+        &self.chunk
+    }
+
+    /// Compiles `stmts` onto the end of the program so far and returns the byte offset
+    /// where their code starts. On an error, everything this call added is removed again,
+    /// so a REPL input that fails to compile defines nothing.
+    pub fn add(&mut self, stmts: &[Stmt], passes: Passes) -> Result<usize, String> {
+        let c = &self.chunk;
+        let before = (c.code.len(), c.constants.len(), c.strings.len(), c.functions.len(), c.global_names.len());
+        let start = c.code.len();
+        let result = self.add_inner(stmts, passes);
+        self.items.clear();
+        self.fn_labels.clear();
+        self.next_label = 0;
+        if result.is_err() {
+            let (code, constants, strings, functions, globals) = before;
+            let c = &mut self.chunk;
+            c.code.truncate(code);
+            c.lines.truncate(code);
+            c.constants.truncate(constants);
+            c.strings.truncate(strings);
+            c.functions.truncate(functions);
+            c.global_names.truncate(globals);
+            self.globals.retain(|_, slot| (*slot as usize) < globals);
+            // An error can leave function scopes open; between inputs there's only the script.
+            self.fns = vec![FnState::default()];
+        }
+        result.map(|()| start)
+    }
+
+    fn add_inner(&mut self, stmts: &[Stmt], passes: Passes) -> Result<(), String> {
+        for s in stmts {
+            self.stmt(s)?;
+        }
+        let entries: Vec<Label> = self.fn_labels.iter().map(|f| f.start).collect();
+        optimize(&mut self.items, &mut self.chunk.constants, &entries, passes);
+        relocate(&self.items, &self.fn_labels, &mut self.chunk)
+    }
 }
 
 #[derive(Default)]

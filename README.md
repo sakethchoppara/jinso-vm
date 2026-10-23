@@ -34,8 +34,10 @@ cargo build --release
 ./target/release/jinso run -O0 examples/fib.jo           # without the optimizer (-O1 is the default)
 ./target/release/jinso run --verify examples/fib.jo      # run at -O0 and -O1, fail if they differ
 ./target/release/jinso dis --diff bench/branchy.jo       # unoptimized and optimized side by side
+./target/release/jinso repl                              # interactive session
 
-cargo test                          # ~257 cases, each run at -O0 and -O1, normally and under --gc-stress
+cargo test                          # ~277 cases, each run at -O0 and -O1, normally and under --gc-stress
+./scripts/root_removal.sh           # break the GC on purpose, 8 ways; each must fail a test
 ./scripts/bench.sh                  # benchmark against CPython
 cargo run --example fuzz -- 600     # 10 minutes of random input
 
@@ -102,7 +104,8 @@ source ──▶ lexer ──▶ parser ──▶ AST ──▶ compiler ──�
 | `compiler.rs` | AST to an instruction list whose jumps name labels; resolves every name to a local slot, an upvalue or a global |
 | `optimize.rs` | The optimizer's passes, and `relocate`, which lays the instruction list out as bytecode |
 | `chunk.rs` | Opcodes, the `Vec<u8>` bytecode, constant pool, line table, function and upvalue descriptors |
-| `vm.rs` | Decodes the bytecode once, then runs it: value stack, call frames, built-ins |
+| `vm.rs` | Decodes the bytecode once, then runs it: value stack, call frames, built-ins; a `Vm` can outlive one run |
+| `repl.rs` | `jinso repl`: the line loop, continuation prompts and `:` commands |
 | `gc.rs` | Heap of strings, arrays, closures and upvalues; mark-and-sweep with an explicit work stack |
 | `upvalues.rs` | The open upvalues, sorted by stack slot, and closing them |
 | `disasm.rs` | Bytecode listing (`jinso dis`) |
@@ -248,18 +251,20 @@ runs in both modes and must produce identical output.
 **Root-removal experiment.** Each root and each edge marking follows was removed on purpose,
 to check that some test fails. `scripts/root_removal.sh` automates this: it applies each
 deliberate bug in `scripts/mutants/` to a temporary copy of the code, runs the tests, and
-fails if any bug goes unnoticed or if a patch no longer applies to the current code. CI
-runs it on every push (it takes about 12 seconds locally). Current results:
+fails if any bug goes unnoticed, if a mutant doesn't compile, or if a patch no longer
+applies to the current code (so a refactor can't silently turn the experiment off). CI runs
+it on every push. Current results:
 
 | Removed | Tests that fail |
 |---|---|
-| value stack as a root | `programs`, `arrays`, `closures`, `unreachable_cycles_are_collected` |
-| globals as a root | `arrays`, `closures` |
-| constant pool as a root | `programs`, `arrays`, `closures`, both `gc_*` tests |
+| value stack as a root | `programs`, `arrays`, `closures`, `unreachable_cycles_are_collected`, a REPL test |
+| globals as a root | `arrays`, `closures`, `closures_and_arrays_live_across_inputs` (REPL) |
+| constant pool as a root | `programs`, `arrays`, `closures`, both `gc_*` tests, an optimizer test |
 | array elements | `arrays`, `closures` |
 | open upvalues as a root | `closures` |
-| a closure's upvalues | `closures` |
+| a closure's upvalues | `closures`, `closures_and_arrays_live_across_inputs` |
 | a closed upvalue's value | `closures` |
+| closing open upvalues when the REPL recovers from an error | `a_closure_survives_an_error_in_the_call_that_made_it` |
 
 The first round missed three of these. In v1, the globals case passed because every global
 string was also on the stack whenever anything was allocated. In v2, the open-upvalue case
@@ -302,33 +307,74 @@ turning one pass off at a time ([0006](docs/decisions/0006-which-passes-ship.md)
 
 | | fib | loop | strings | branchy |
 |---|---|---|---|---|
-| `-O0` | 1128 | 4992 | 703 | 1217 |
-| `-O1` | **1077** | **4542** | **672** | **858** |
-| without `fold` | 1077 | 4542 | 673 | 1063 |
-| without `thread` | 1077 | 4542 | 673 | 868 |
-| without `fuse` | 1128 | 4992 | 704 | 961 |
+| `-O0` | 1119 | 4772 | 695 | 1193 |
+| `-O1` | **1070** | **4352** | **663** | **842** |
+| without `fold` | 1070 | 4352 | 664 | 1048 |
+| without `thread` | 1070 | 4352 | 664 | 852 |
+| without `fuse` | 1119 | 4772 | 695 | 940 |
 
 `cond`, `unreachable` and `deadjump` don't change these four, which have no literal
-conditions. Where they apply they matter: `cond` cuts a `while true` loop by 17%, and in a
-loop containing an `if false { ... }` debug block, `cond` saves 20% and `unreachable` and
+conditions. Where they apply they matter: `cond` cuts a `while true` loop by 18%, and in a
+loop containing an `if false { ... }` debug block, `cond` saves 21% and `unreachable` and
 `deadjump` another 6% (each is needed: the jump over the block only becomes dead once the
 block is gone).
 
-Against the v3 baseline (fib 1135M, loop 5012M, strings 706M), `-O1` runs **8.2% fewer
-instructions** on the three original benchmarks. Nearly all of that is `fuse`: the PRD's
-other passes find nothing to fold or thread there, so a fourth benchmark, `branchy`, was
-added to measure them; on it `-O1` runs 30% fewer instructions than `-O0`.
+Against the v3 baseline (fib 1135M, loop 5012M, strings 706M), `-O1` runs **11.2% fewer
+instructions** on the three original benchmarks (fib −5.7%, loop −13.2%, strings −6.1%).
+Most of the optimizer's share is `fuse`: the PRD's other passes find nothing to fold or
+thread there, so a fourth benchmark, `branchy`, was added to measure them; on it `-O1` runs
+29% fewer instructions than `-O0`.
 
 **Fewer instructions isn't always faster.** The first version of `fuse` cut instructions
 but made the VM's main loop slower in cycles for every program, optimized or not: five new
 `match` arms, each with its own copy of the error formatting, cost about 20%, and moving the
-formatting into one cold function cost even more. Merging them into one arm fixed it. In
-cycles, `-O1` is now 9% faster than the baseline on loop, 3% slower on fib and 6% slower on
-strings, about 5.5% faster in total. So the optimizer clearly removes work, but its effect on
-time is smaller and uneven, and VM changes are now judged on cycles as well as instructions.
+formatting into one cold function cost even more. Merging them into one arm fixed it, and
+building with one codegen unit stopped unrelated code from changing how the main loop is
+inlined. In cycles (minimum of 5 runs), `-O1` against the v3 baseline is now: fib −1%,
+loop −10%, strings +6%, **6.7% fewer in total**; branchy runs 38% fewer cycles than at
+`-O0`. So the optimizer clearly removes work, its effect on time is smaller and uneven, and
+VM changes are now judged on cycles as well as instructions.
 
-Optimizing costs about 0.2 ms on a 1,150-line program (every example and benchmark
-concatenated ten times): 0.34 ms to compile at `-O1` against 0.15 ms at `-O0`.
+Optimizing costs about 0.3 ms on a 1,330-line program (every example and benchmark
+concatenated ten times): 0.45 ms to compile at `-O1` against 0.15 ms at `-O0`.
+
+## The REPL
+
+```
+$ jinso repl
+> let x = 5;
+> print x * 2;
+10
+> fn double(n) { return n * 2; }
+> print double(x);
+10
+> print 1 / 0;
+line 1: division by zero
+> print x;
+5
+> while x > 3 {
+...   x = x - 1;
+... }
+> :dis
+0050    1 GetGlobal       0  (x)
+0053    | Constant        7  (3)
+0056    | JumpIfNotGt    12  (-> 0071)
+0059    2 GetGlobal       0  (x)
+0062    | SubConst        8  (1)
+0065    | SetGlobal       0  (x)
+0068    1 Loop           21  (-> 0050)
+```
+
+Every input is compiled onto the end of the same program and run in the same VM, so
+globals, functions, closures and arrays from earlier inputs stay alive. A runtime error
+resets the stack and closes any open upvalues, but keeps the heap and the globals; a syntax
+or compile error adds nothing at all ([0009](docs/decisions/0009-repl-state-model.md)).
+Whether to show `... ` is the parser's call: it reports when its first error was hitting the
+end of the input, so `{` or `\"` inside a string never confuses it
+([0010](docs/decisions/0010-continuation-detection.md)). A blank line at `... ` gives up and
+reports the error. `:dis` shows the last input's bytecode, `:reset` starts over, `:quit`
+exits. It reads plain lines, so it works piped (`printf 'print 1;' | jinso repl`), which is
+how its tests drive it.
 
 ## Benchmarks
 
@@ -390,13 +436,15 @@ short view keeps its whole buffer alive.
 
 ## Testing
 
-- **Tests**: about 257 cases in 46 tests. `tests/lang.rs` covers every opcode, precedence
+- **Tests**: about 277 cases in 60 tests. `tests/lang.rs` covers every opcode, precedence
   and associativity, scoping, closures at one, two and three levels of nesting, arrays and
   aliasing, cycles, and every runtime and syntax error path; `tests/escapes.rs` every escape
   and escape error with its position; `tests/optimize.rs` what each pass must and must not
-  do, line numbers after folding, jump threading in nested loops, and the optimizer's cost.
-  Every program runs four ways, at `-O0` and `-O1`, each normally and under `--gc-stress`,
-  and all four must agree.
+  do, line numbers after folding, jump threading in nested loops, and the optimizer's cost;
+  `tests/repl.rs` piped sessions: multi-line blocks, recovery from runtime, syntax and
+  compile errors, closures across inputs, and 100 inputs of globals under `--gc-stress`.
+  Every program and session runs four ways, at `-O0` and `-O1`, each normally and under
+  `--gc-stress`, and all four must agree.
 - **Fuzzing** (`examples/fuzz.rs`): feeds random token soup, including array, closure and
   escape fragments, and mutated example programs through the whole pipeline with debug
   assertions on, at both `-O0` and `-O1`; any difference between them fails the run. Programs run under a step budget (`vm::run_limited`, which counts loop iterations and
@@ -419,7 +467,10 @@ short view keeps its whole buffer alive.
 - [0006](docs/decisions/0006-which-passes-ship.md): which passes ship, and fewer instructions vs fewer cycles
 - [0007](docs/decisions/0007-differential-testing.md): differential testing, and what it can't catch
 - [0008](docs/decisions/0008-escape-decoding-in-the-lexer.md): escapes are decoded in the lexer
+- [0009](docs/decisions/0009-repl-state-model.md): what the REPL keeps between inputs, and what an error resets
+- [0010](docs/decisions/0010-continuation-detection.md): the parser, not a brace count, decides when to read another line
 
 ## Not yet
 
-Structs, a REPL, and a standard library beyond `len` and `push`.
+Structs, modules, line editing and history in the REPL, and a standard library beyond `len`
+and `push`.

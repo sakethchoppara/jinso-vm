@@ -7,3 +7,9 @@ edition = "2024"
 crate-type = ["rlib", "cdylib"] # cdylib produces jinso.wasm for the playground
 
 [dependencies]
+
+[profile.release]
+# One codegen unit: the VM's inlining no longer depends on how unrelated code (like the
+# REPL) happens to be split across units. Measured: equal or fewer instructions and cycles
+# on every benchmark, and branchy -11% cycles against the default of 16. LTO was worse.
+codegen-units = 1

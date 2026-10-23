@@ -69,11 +69,9 @@ fn size(kind: &Kind) -> usize {
 }
 
 impl Heap {
-    /// Seeds the heap with the program's string literals, so literal `i` is handle `i`
-    /// and the compiler can emit `Value::Str` constants before the heap exists.
     /// `stress` collects before every allocation, to flush out missing roots.
-    pub fn new(literals: &[String], stress: bool) -> Heap {
-        let mut heap = Heap {
+    pub fn new(stress: bool) -> Heap {
+        Heap {
             objects: Vec::new(),
             live: Vec::new(),
             free: Vec::new(),
@@ -84,11 +82,7 @@ impl Heap {
             collections: 0,
             freed: 0,
             peak_work: 0,
-        };
-        for s in literals {
-            heap.alloc_str(s.clone());
         }
-        heap
     }
 
     fn obj(&self, h: u32) -> &Obj {

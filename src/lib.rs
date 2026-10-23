@@ -6,6 +6,7 @@ pub mod gc;
 pub mod lexer;
 pub mod optimize;
 pub mod parser;
+pub mod repl;
 pub mod upvalues;
 pub mod value;
 pub mod vm;
@@ -16,7 +17,7 @@ use std::io::Write;
 
 /// Source to AST. Multiple syntax errors are joined with newlines.
 pub fn parse(src: &str) -> Result<Vec<ast::Stmt>, String> {
-    parser::parse(lexer::lex(src)?).map_err(|errs| errs.join("\n"))
+    parser::parse(lexer::lex(src)?).map_err(|errs| errs.messages.join("\n"))
 }
 
 /// Compiles with every optimization (`-O1`).

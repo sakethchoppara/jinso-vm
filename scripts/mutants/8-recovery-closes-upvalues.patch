@@ -1,0 +1,10 @@
+--- a/src/vm.rs
++++ b/src/vm.rs
+@@ -202,7 +202,6 @@
+         let result = self.execute(chunk, start, out, steps);
+         if result.is_err() {
+             // Closures that outlive the failed run keep the values they captured.
+-            self.open.close(&mut self.heap, &self.stack, 0);
+             self.stack.clear();
+         }
+         result
