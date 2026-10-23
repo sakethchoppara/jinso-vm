@@ -172,6 +172,12 @@ let me = ["self"];
 push(me, me);           // a cycle prints as [...]
 print me;
 `,
+  'Escapes': `// Escapes are decoded when the string is read.
+print "line one\\nline two";
+print "say \\"hi\\"\\tand tab";
+print "smile \\u{1F600}";
+print ["inside an array", "a\\nb"];   // shown escaped
+`,
   'Errors': `// The parser recovers after an error,
 // so it reports every syntax error in one pass.
 let = 1;

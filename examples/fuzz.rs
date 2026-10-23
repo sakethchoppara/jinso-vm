@@ -17,6 +17,8 @@ const VOCAB: &[&str] = &[
     // closure fragments: nested functions that capture, return and call each other
     "fn f() {", "fn g(x) { return x + y; }", "fn h() { y = y + 1; return h; }", "let y = 0;",
     "return g;", "f()()", "g(1)", "h()()",
+    // escape fragments, valid and not
+    "\"a\\nb\"", "\"\\\"\"", "\"\\u{1F600}\"", "\"\\u{D800}\"", "\"\\q\"", "\"\\u{\"", "\"x\\",
 ];
 
 /// xorshift64: plenty for picking tokens, and no dependency.

@@ -120,20 +120,72 @@ pub fn lex(src: &str) -> Result<Vec<Token>, String> {
                 continue;
             }
             '"' => {
-                while i < chars.len() && chars[i] != '"' {
-                    if chars[i] == '\n' {
-                        line += 1;
-                        col = 0;
-                    }
+                // Escapes are decoded here, so the token carries the string's real value.
+                // Running out of input anywhere inside is an unterminated string, reported
+                // at the opening quote; a bad escape is reported at its backslash.
+                let unterminated = || format!("{tl}:{tc}: unterminated string");
+                let mut s = String::new();
+                loop {
+                    let Some(&c) = chars.get(i) else { return Err(unterminated()) };
                     i += 1;
                     col += 1;
+                    match c {
+                        '"' => break,
+                        '\\' => {
+                            let (el, ec) = (line, col - 1);
+                            let Some(&e) = chars.get(i) else { return Err(unterminated()) };
+                            i += 1;
+                            col += 1;
+                            match e {
+                                'n' => s.push('\n'),
+                                't' => s.push('\t'),
+                                'r' => s.push('\r'),
+                                '\\' => s.push('\\'),
+                                '"' => s.push('"'),
+                                '0' => s.push('\0'),
+                                'u' => {
+                                    if i == chars.len() {
+                                        return Err(unterminated());
+                                    }
+                                    if chars.get(i) != Some(&'{') {
+                                        return Err(format!("{el}:{ec}: expected '{{' after \\u"));
+                                    }
+                                    i += 1;
+                                    col += 1;
+                                    let digits_at = i;
+                                    while chars.get(i).is_some_and(|c| c.is_ascii_hexdigit()) {
+                                        i += 1;
+                                        col += 1;
+                                    }
+                                    let hex: String = chars[digits_at..i].iter().collect();
+                                    match chars.get(i) {
+                                        None => return Err(unterminated()),
+                                        Some('}') => {}
+                                        Some(_) => return Err(format!("{el}:{ec}: \\u{{...}} needs 1 to 6 hex digits and a closing '}}'")),
+                                    }
+                                    i += 1;
+                                    col += 1;
+                                    if hex.is_empty() || hex.len() > 6 {
+                                        return Err(format!("{el}:{ec}: \\u{{{hex}}} needs 1 to 6 hex digits"));
+                                    }
+                                    let code = u32::from_str_radix(&hex, 16).unwrap();
+                                    let Some(ch) = char::from_u32(code) else {
+                                        return Err(format!("{el}:{ec}: \\u{{{hex}}} is not a valid Unicode scalar value"));
+                                    };
+                                    s.push(ch);
+                                }
+                                e => return Err(format!("{el}:{ec}: unknown escape sequence '\\{e}'")),
+                            }
+                        }
+                        '\n' => {
+                            line += 1;
+                            col = 1;
+                            s.push(c);
+                        }
+                        c => s.push(c),
+                    }
                 }
-                if i == chars.len() {
-                    return Err(format!("{tl}:{tc}: unterminated string"));
-                }
-                i += 1;
-                col += 1;
-                Tok::Str(chars[start + 1..i - 1].iter().collect())
+                Tok::Str(s)
             }
             c if c.is_ascii_digit() => {
                 while i < chars.len() && chars[i].is_ascii_digit() {

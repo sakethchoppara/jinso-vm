@@ -61,6 +61,7 @@ Actions rebuilds it and deploys it to Pages on every push to `main`.
 | Closures | a nested function can read and assign its enclosing functions' variables, even after they return |
 | Arrays | `[1, 2, 3]`, `a[i]`, `len(a)`, `push(a, v)`; shared by reference, may nest or contain themselves |
 | Scoping | top-level variables are globals; variables declared in a block or function are locals |
+| Strings | `"..."` with escapes `\n \t \r \\ \" \0` and `\u{1F600}` (1 to 6 hex digits) |
 | Comments | `// to end of line` |
 
 Jinso is dynamically typed with strict checks: `1 + true`, `if 1 { }` and `not 5` are
@@ -75,7 +76,10 @@ line 1: stack overflow (more than 4096 nested calls)
 ```
 
 Syntax errors don't stop at the first one: the parser recovers at the next statement and
-reports them all.
+reports them all. A bad escape is reported at its backslash (`1:10: unknown escape sequence
+'\q'`), and `\u{D800}`, values above `\u{10FFFF}` and an empty `\u{}` are errors too.
+Escapes are decoded by the lexer, so the disassembler and syntax tree show string constants
+in escaped form and a multi-line string doesn't break the listing.
 
 ## Architecture
 
@@ -347,4 +351,4 @@ short view keeps its whole buffer alive.
 
 ## Not yet
 
-Structs, a REPL, string escapes, and a standard library beyond `len` and `push`.
+Structs, a REPL, and a standard library beyond `len` and `push`.
