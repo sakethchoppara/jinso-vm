@@ -382,11 +382,11 @@ how its tests drive it.
 
 | Benchmark | jinso | CPython 3.13.5 | jinso vs CPython | jinso instructions |
 |---|---|---|---|---|
-| branchy | 0.075s | 0.121s | 1.61x faster | 842M |
-| fib | 0.112s | 0.114s | 1.02x faster | 1070M |
-| loop | 0.418s | 0.611s | 1.46x faster | 4352M |
-| primes | 0.197s | 0.177s | 1.11x slower | 1767M |
-| strings | 0.063s | 0.070s | 1.11x faster | 664M |
+| branchy | 0.075s | 0.118s | 1.57x faster | 843M |
+| fib | 0.114s | 0.115s | 1.01x faster | 1069M |
+| loop | 0.420s | 0.607s | 1.45x faster | 4342M |
+| primes | 0.176s | 0.178s | 1.01x faster | 1603M |
+| strings | 0.064s | 0.071s | 1.11x faster | 663M |
 
 | Program | What it measures |
 |---|---|
@@ -396,14 +396,15 @@ how its tests drive it.
 | `primes` | counting the 148,933 primes below 2 million with an odd-only Sieve of Eratosthenes |
 | `strings` | 1,000,000 appends of one character to a growing string |
 
-`primes` is the one CPython wins, and the profile says why: it's the only benchmark built on
-arrays, and array access is Jinso's least optimized path. Each `composite[j] = true` goes
-through bounds and type checks in functions the compiler doesn't inline (`element`,
-`Heap::array_mut`: about 10% of the run), and building the million-entry array calls the
-`push` built-in a million times (about 5%). CPython's list indexing is a tight C path. The
-Python version is a line-for-line match with `while` loops; idiomatic Python would hand the
-sieve to C with slice assignment (`composite[p*p//2::p] = ...`), which is a different
-implementation rather than the same algorithm.
+`primes` was the one CPython won when it was added (0.197s against 0.177s): it's the only
+benchmark built on arrays, and each `composite[j] = true` called out-of-line functions for
+its bounds and type checks. Inlining those helpers and checking the common case (an array
+and an in-range int) directly in `Index` and `SetIndex`, with errors explained out of line,
+cut its cycles by 11% and brought it level with CPython
+([0011](docs/decisions/0011-fast-array-access.md)). The Python version is a line-for-line
+match with `while` loops; idiomatic Python would hand the sieve to C with slice assignment
+(`composite[p*p//2::p] = ...`), which is a different implementation rather than the same
+algorithm.
 
 Wall-clock time moves by about ±5% between builds from code layout alone. Instructions
 executed, the last column, barely changes between runs, which is how a real 7–12% slowdown
@@ -481,6 +482,7 @@ short view keeps its whole buffer alive.
 - [0008](docs/decisions/0008-escape-decoding-in-the-lexer.md): escapes are decoded in the lexer
 - [0009](docs/decisions/0009-repl-state-model.md): what the REPL keeps between inputs, and what an error resets
 - [0010](docs/decisions/0010-continuation-detection.md): the parser, not a brace count, decides when to read another line
+- [0011](docs/decisions/0011-fast-array-access.md): fast array access, and an inlined `push` that didn't pay
 
 ## Not yet
 

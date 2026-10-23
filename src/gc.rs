@@ -85,10 +85,12 @@ impl Heap {
         }
     }
 
+    #[inline]
     fn obj(&self, h: u32) -> &Obj {
         self.objects[h as usize].as_ref().expect("dangling handle: GC freed a live object")
     }
 
+    #[inline]
     fn obj_mut(&mut self, h: u32) -> &mut Obj {
         self.objects[h as usize].as_mut().expect("dangling handle: GC freed a live object")
     }
@@ -104,6 +106,7 @@ impl Heap {
         &self.buf(h)[..len as usize]
     }
 
+    #[inline]
     pub fn array(&self, h: u32) -> &[Value] {
         match &self.obj(h).kind {
             Kind::Array(items) => items,
@@ -111,6 +114,7 @@ impl Heap {
         }
     }
 
+    #[inline]
     pub fn array_mut(&mut self, h: u32) -> &mut Vec<Value> {
         match &mut self.obj_mut(h).kind {
             Kind::Array(items) => items,
@@ -142,6 +146,7 @@ impl Heap {
 
     /// Appends to an array, charging any buffer growth to the GC. Allocates no object,
     /// so it never needs a collection.
+    #[inline]
     pub fn push(&mut self, h: u32, v: Value) {
         let items = self.array_mut(h);
         let before = items.capacity();

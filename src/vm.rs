@@ -45,19 +45,18 @@ fn rem(x: i64, y: i64) -> Result<Value, &'static str> {
     if y == 0 { Err("division by zero") } else { x.checked_rem(y).map(Value::Int).ok_or("integer overflow") }
 }
 
-/// Checks `target[i]` and returns the array handle and element position.
-fn element(heap: &Heap, target: Value, i: Value) -> Result<(u32, usize), String> {
+/// Why `target[i]` failed. Only reached on an error: `Index` and `SetIndex` check the
+/// common case inline, and keeping the formatting out of the main loop keeps it fast.
+#[cold]
+#[inline(never)]
+fn index_error(heap: &Heap, target: Value, i: Value) -> String {
     let Value::Array(h) = target else {
-        return Err(format!("cannot index a value of type {}", target.type_name()));
+        return format!("cannot index a value of type {}", target.type_name());
     };
     let Value::Int(i) = i else {
-        return Err(format!("array index must be an int, got {}", i.type_name()));
+        return format!("array index must be an int, got {}", i.type_name());
     };
-    let len = heap.array(h).len();
-    match usize::try_from(i) {
-        Ok(at) if at < len => Ok((h, at)),
-        _ => Err(format!("index {i} out of bounds for array of length {len}")),
-    }
+    format!("index {i} out of bounds for array of length {}", heap.array(h).len())
 }
 
 /// Arrays nested deeper than this print as `[...]`, so printing never recurses unboundedly.
@@ -442,18 +441,29 @@ impl Vm {
                     let items = stack.split_off(stack.len() - arg);
                     stack.push(heap.alloc_array(items));
                 }
+                // An array and an in-range int index is the whole fast path; anything else
+                // is an error, explained out of line by `index_error`.
                 Op::Index => {
-                    let i = stack.pop().unwrap();
-                    let target = stack.pop().unwrap();
-                    let (h, at) = element(heap, target, i).map_err(err)?;
-                    stack.push(heap.array(h)[at]);
+                    let n = stack.len();
+                    let (target, i) = (stack[n - 2], stack[n - 1]);
+                    let found = match (target, i) {
+                        (Value::Array(h), Value::Int(i)) => usize::try_from(i).ok().and_then(|i| heap.array(h).get(i).copied()),
+                        _ => None,
+                    };
+                    let Some(v) = found else { return Err(err(index_error(heap, target, i))) };
+                    stack[n - 2] = v;
+                    stack.pop();
                 }
                 Op::SetIndex => {
-                    let v = stack.pop().unwrap();
-                    let i = stack.pop().unwrap();
-                    let target = stack.pop().unwrap();
-                    let (h, at) = element(heap, target, i).map_err(err)?;
-                    heap.array_mut(h)[at] = v;
+                    let n = stack.len();
+                    let (target, i, v) = (stack[n - 3], stack[n - 2], stack[n - 1]);
+                    let slot = match (target, i) {
+                        (Value::Array(h), Value::Int(i)) => usize::try_from(i).ok().and_then(|i| heap.array_mut(h).get_mut(i)),
+                        _ => None,
+                    };
+                    let Some(slot) = slot else { return Err(err(index_error(heap, target, i))) };
+                    *slot = v;
+                    stack.truncate(n - 3);
                 }
                 Op::Add => int_op!(add),
                 Op::Sub => int_op!(sub),
