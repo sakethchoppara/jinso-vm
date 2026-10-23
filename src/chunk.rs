@@ -112,38 +112,6 @@ pub struct Chunk {
 }
 
 impl Chunk {
-    pub fn emit(&mut self, op: Op, line: u32) {
-        self.code.push(op as u8);
-        self.lines.push(line);
-    }
-
-    pub fn emit_arg(&mut self, op: Op, arg: u16, line: u32) {
-        self.emit(op, line);
-        self.code.extend(arg.to_be_bytes());
-        self.lines.extend([line, line]);
-    }
-
-    /// Emits a forward jump with a placeholder offset; returns where to patch it.
-    pub fn emit_jump(&mut self, op: Op, line: u32) -> usize {
-        self.emit_arg(op, u16::MAX, line);
-        self.code.len() - 2
-    }
-
-    /// Backpatches a forward jump to land on the next instruction to be emitted.
-    /// The offset is relative to the end of the jump instruction (where ip is after decoding it).
-    pub fn patch_jump(&mut self, at: usize) -> Result<(), String> {
-        let offset = u16::try_from(self.code.len() - (at + 2)).map_err(|_| "jump too large".to_string())?;
-        self.code[at..at + 2].copy_from_slice(&offset.to_be_bytes());
-        Ok(())
-    }
-
-    /// Emits a backward jump to `start`.
-    pub fn emit_loop(&mut self, start: usize, line: u32) -> Result<(), String> {
-        let offset = u16::try_from(self.code.len() + 3 - start).map_err(|_| format!("line {line}: loop body too large"))?;
-        self.emit_arg(Op::Loop, offset, line);
-        Ok(())
-    }
-
     /// Like Display, but resolves function names and string literals (not runtime strings).
     pub fn show(&self, v: Value) -> String {
         match v {

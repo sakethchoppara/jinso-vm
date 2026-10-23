@@ -4,6 +4,7 @@ pub mod compiler;
 pub mod disasm;
 pub mod gc;
 pub mod lexer;
+pub mod optimize;
 pub mod parser;
 pub mod upvalues;
 pub mod value;

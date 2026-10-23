@@ -1,14 +1,24 @@
 use crate::ast::{BinOp, Expr, ExprKind, Stmt, UnOp};
 use crate::chunk::{Chunk, FnInfo, Op, UpvalueDesc};
+use crate::optimize::{FnLabels, Item, Label, relocate};
 use crate::value::Value;
 use std::collections::HashMap;
 
-/// Walks the AST and emits stack-machine bytecode.
+/// Walks the AST and emits stack-machine bytecode: first as an instruction list with
+/// symbolic jump labels, then laid out by `relocate`.
 pub fn compile(stmts: &[Stmt]) -> Result<Chunk, String> {
-    let mut c = Compiler { chunk: Chunk::default(), globals: HashMap::new(), fns: vec![FnState::default()] };
+    let mut c = Compiler {
+        chunk: Chunk::default(),
+        globals: HashMap::new(),
+        fns: vec![FnState::default()],
+        items: Vec::new(),
+        next_label: 0,
+        fn_labels: Vec::new(),
+    };
     for s in stmts {
         c.stmt(s)?;
     }
+    relocate(&c.items, &c.fn_labels, &mut c.chunk)?;
     Ok(c.chunk)
 }
 
@@ -18,6 +28,10 @@ struct Compiler {
     /// One entry per function being compiled, innermost last. Entry 0 is the top-level
     /// script, whose block locals live at the bottom of the stack (frame base 0).
     fns: Vec<FnState>,
+    /// The program so far, with jumps pointing at labels.
+    items: Vec<Item>,
+    next_label: Label,
+    fn_labels: Vec<FnLabels>,
 }
 
 #[derive(Default)]
@@ -46,6 +60,34 @@ enum Var {
 }
 
 impl Compiler {
+    fn emit(&mut self, op: Op, line: u32) {
+        self.items.push(Item::Ins { op, arg: 0, line });
+    }
+
+    fn emit_arg(&mut self, op: Op, arg: u16, line: u32) {
+        self.items.push(Item::Ins { op, arg, line });
+    }
+
+    fn label(&mut self) -> Label {
+        self.next_label += 1;
+        self.next_label - 1
+    }
+
+    fn place(&mut self, label: Label) {
+        self.items.push(Item::Label(label));
+    }
+
+    fn goto(&mut self, target: Label, line: u32) {
+        self.items.push(Item::Goto { target, line });
+    }
+
+    /// A conditional jump to a new label, returned for the caller to place.
+    fn branch(&mut self, op: Op, line: u32) -> Label {
+        let target = self.label();
+        self.items.push(Item::Branch { op, target, line });
+        target
+    }
+
     fn cur(&mut self) -> &mut FnState {
         self.fns.last_mut().unwrap()
     }
@@ -116,7 +158,7 @@ impl Compiler {
     fn constant(&mut self, v: Value, line: u32) -> Result<(), String> {
         let i = u16::try_from(self.chunk.constants.len()).map_err(|_| format!("line {line}: too many constants"))?;
         self.chunk.constants.push(v);
-        self.chunk.emit_arg(Op::Constant, i, line);
+        self.emit_arg(Op::Constant, i, line);
         Ok(())
     }
 
@@ -127,9 +169,12 @@ impl Compiler {
         }
         let f = self.fns.last_mut().unwrap();
         f.depth -= 1;
+        let mut ended = Vec::new();
         while f.locals.last().is_some_and(|l| l.depth > f.depth) {
-            let local = f.locals.pop().unwrap();
-            self.chunk.emit(if local.captured { Op::CloseUpvalue } else { Op::Pop }, line);
+            ended.push(f.locals.pop().unwrap().captured);
+        }
+        for captured in ended {
+            self.emit(if captured { Op::CloseUpvalue } else { Op::Pop }, line);
         }
         Ok(())
     }
@@ -140,7 +185,7 @@ impl Compiler {
                 self.expr(init)?;
                 if self.fns.len() == 1 && self.cur().depth == 0 {
                     let i = self.global(name)?;
-                    self.chunk.emit_arg(Op::DefineGlobal, i, *line);
+                    self.emit_arg(Op::DefineGlobal, i, *line);
                 } else {
                     // The initializer's value is already on the stack, in exactly the slot
                     // this local gets, so declaring it emits no code.
@@ -154,17 +199,17 @@ impl Compiler {
                     Var::Upvalue(i) => (Op::SetUpvalue, i),
                     Var::Global(i) => (Op::SetGlobal, i),
                 };
-                self.chunk.emit_arg(op, i, *line);
+                self.emit_arg(op, i, *line);
             }
             Stmt::IndexAssign { target, index, value, line } => {
                 self.expr(target)?;
                 self.expr(index)?;
                 self.expr(value)?;
-                self.chunk.emit(Op::SetIndex, *line);
+                self.emit(Op::SetIndex, *line);
             }
             Stmt::Print(e) => {
                 self.expr(e)?;
-                self.chunk.emit(Op::Print, e.line);
+                self.emit(Op::Print, e.line);
             }
             // Jump over; body...; Nil; Return; over: (Constant <fn> | Closure f); bind name
             Stmt::Fn { name, params, body, line } => {
@@ -174,10 +219,14 @@ impl Compiler {
                     // slot gets filled when the Constant or Closure below runs.
                     self.declare_local(name, *line)?;
                 }
-                let over = self.chunk.emit_jump(Op::Jump, *line);
+                let over = self.label();
+                self.goto(over, *line);
                 let idx = u16::try_from(self.chunk.functions.len()).map_err(|_| "too many functions".to_string())?;
-                let offset = self.chunk.code.len();
-                self.chunk.functions.push(FnInfo { name: name.clone(), arity: params.len() as u8, offset, end: 0, upvalues: Vec::new() });
+                let (start, end) = (self.label(), self.label());
+                self.place(start);
+                // offset and end are filled in by `relocate`.
+                self.chunk.functions.push(FnInfo { name: name.clone(), arity: params.len() as u8, offset: 0, end: 0, upvalues: Vec::new() });
+                self.fn_labels.push(FnLabels { index: idx as usize, start, end });
 
                 self.fns.push(FnState { depth: 1, ..FnState::default() });
                 for p in params {
@@ -192,22 +241,21 @@ impl Compiler {
                 // Implicit `return nil;`. Return closes upvalues and discards the frame,
                 // so no Pops or CloseUpvalues are needed.
                 self.constant(Value::Nil, *line)?;
-                self.chunk.emit(Op::Return, *line);
+                self.emit(Op::Return, *line);
                 let state = self.fns.pop().unwrap();
 
-                let info = &mut self.chunk.functions[idx as usize];
-                info.end = self.chunk.code.len();
-                info.upvalues = state.upvalues;
-                self.chunk.patch_jump(over)?;
+                self.chunk.functions[idx as usize].upvalues = state.upvalues;
+                self.place(end);
+                self.place(over);
                 // A function that captures nothing needs no closure object.
                 if self.chunk.functions[idx as usize].upvalues.is_empty() {
                     self.constant(Value::Fn(idx), *line)?;
                 } else {
-                    self.chunk.emit_arg(Op::Closure, idx, *line);
+                    self.emit_arg(Op::Closure, idx, *line);
                 }
                 if global {
                     let g = self.global(name)?;
-                    self.chunk.emit_arg(Op::DefineGlobal, g, *line);
+                    self.emit_arg(Op::DefineGlobal, g, *line);
                 }
             }
             Stmt::Return { value, line } => {
@@ -215,41 +263,43 @@ impl Compiler {
                     return Err(format!("line {line}: return outside function"));
                 }
                 self.expr(value)?;
-                self.chunk.emit(Op::Return, *line);
+                self.emit(Op::Return, *line);
             }
             Stmt::Expr(e) => {
                 self.expr(e)?;
-                self.chunk.emit(Op::Pop, e.line);
+                self.emit(Op::Pop, e.line);
             }
             // cond; JumpIfFalse else; then; [Jump end; else: els;] end:
             Stmt::If { cond, then, els, line } => {
                 let to_else = self.cond_jump(cond)?;
                 self.block(then, *line)?;
                 if els.is_empty() {
-                    self.chunk.patch_jump(to_else)?;
+                    self.place(to_else);
                 } else {
-                    let to_end = self.chunk.emit_jump(Op::Jump, *line);
-                    self.chunk.patch_jump(to_else)?;
+                    let end = self.label();
+                    self.goto(end, *line);
+                    self.place(to_else);
                     self.block(els, *line)?;
-                    self.chunk.patch_jump(to_end)?;
+                    self.place(end);
                 }
             }
             // start: cond; JumpIfFalse exit; body; Loop start; exit:
             Stmt::While { cond, body, line } => {
-                let start = self.chunk.code.len();
-                let to_exit = self.cond_jump(cond)?;
+                let start = self.label();
+                self.place(start);
+                let exit = self.cond_jump(cond)?;
                 self.block(body, *line)?;
-                self.chunk.emit_loop(start, *line)?;
-                self.chunk.patch_jump(to_exit)?;
+                self.goto(start, *line);
+                self.place(exit);
             }
         }
         Ok(())
     }
 
     /// Compiles an `if`/`while` condition and the jump taken when it's false; returns the
-    /// jump to patch. A comparison becomes one compare-and-branch instruction instead of
+    /// label to place where the false case continues. A comparison becomes one compare-and-branch instruction instead of
     /// `Lt` (push a bool) followed by `JumpIfFalse` (pop it).
-    fn cond_jump(&mut self, cond: &Expr) -> Result<usize, String> {
+    fn cond_jump(&mut self, cond: &Expr) -> Result<Label, String> {
         let fused = match &cond.kind {
             ExprKind::Binary(BinOp::Lt, l, r) => Some((Op::JumpIfNotLt, l, r)),
             ExprKind::Binary(BinOp::Le, l, r) => Some((Op::JumpIfNotLe, l, r)),
@@ -268,7 +318,7 @@ impl Compiler {
                 Op::JumpIfFalse
             }
         };
-        Ok(self.chunk.emit_jump(op, cond.line))
+        Ok(self.branch(op, cond.line))
     }
 
     fn expr(&mut self, e: &Expr) -> Result<(), String> {
@@ -289,51 +339,53 @@ impl Compiler {
                     Var::Upvalue(i) => (Op::GetUpvalue, i),
                     Var::Global(i) => (Op::GetGlobal, i),
                 };
-                self.chunk.emit_arg(op, i, line);
+                self.emit_arg(op, i, line);
             }
             ExprKind::Call(callee, args) => {
                 self.expr(callee)?;
                 for a in args {
                     self.expr(a)?;
                 }
-                self.chunk.emit_arg(Op::Call, args.len() as u16, line);
+                self.emit_arg(Op::Call, args.len() as u16, line);
             }
             ExprKind::Array(items) => {
                 for item in items {
                     self.expr(item)?;
                 }
-                self.chunk.emit_arg(Op::MakeArray, items.len() as u16, line);
+                self.emit_arg(Op::MakeArray, items.len() as u16, line);
             }
             ExprKind::Index(target, index) => {
                 self.expr(target)?;
                 self.expr(index)?;
-                self.chunk.emit(Op::Index, line);
+                self.emit(Op::Index, line);
             }
             ExprKind::Unary(op, inner) => {
                 self.expr(inner)?;
-                self.chunk.emit(if *op == UnOp::Neg { Op::Neg } else { Op::Not }, line);
+                self.emit(if *op == UnOp::Neg { Op::Neg } else { Op::Not }, line);
             }
             // Short-circuit: r runs only if it decides the result. JumpIfFalse has already
             // checked that l is a bool, so when l decides, the result is a known constant.
             // l; JumpIfFalse short; r; Jump end; short: false; end:
             ExprKind::Binary(BinOp::And, l, r) => {
                 self.expr(l)?;
-                let to_short = self.chunk.emit_jump(Op::JumpIfFalse, line);
+                let short = self.branch(Op::JumpIfFalse, line);
                 self.expr(r)?;
-                let to_end = self.chunk.emit_jump(Op::Jump, line);
-                self.chunk.patch_jump(to_short)?;
+                let end = self.label();
+                self.goto(end, line);
+                self.place(short);
                 self.constant(Value::Bool(false), line)?;
-                self.chunk.patch_jump(to_end)?;
+                self.place(end);
             }
             // l; JumpIfFalse rhs; true; Jump end; rhs: r; end:
             ExprKind::Binary(BinOp::Or, l, r) => {
                 self.expr(l)?;
-                let to_rhs = self.chunk.emit_jump(Op::JumpIfFalse, line);
+                let rhs = self.branch(Op::JumpIfFalse, line);
                 self.constant(Value::Bool(true), line)?;
-                let to_end = self.chunk.emit_jump(Op::Jump, line);
-                self.chunk.patch_jump(to_rhs)?;
+                let end = self.label();
+                self.goto(end, line);
+                self.place(rhs);
                 self.expr(r)?;
-                self.chunk.patch_jump(to_end)?;
+                self.place(end);
             }
             ExprKind::Binary(op, l, r) => {
                 self.expr(l)?;
@@ -353,9 +405,9 @@ impl Compiler {
                     BinOp::Ge => (Op::Lt, true),
                     BinOp::And | BinOp::Or => unreachable!("handled above"),
                 };
-                self.chunk.emit(op, line);
+                self.emit(op, line);
                 if negate {
-                    self.chunk.emit(Op::Not, line);
+                    self.emit(Op::Not, line);
                 }
             }
         }
