@@ -83,7 +83,7 @@ pub unsafe extern "C" fn run(ptr: *mut u8, len: usize, gc_stress: u32) {
     let ast: String = stmts.iter().map(|s| format!("{s}\n")).collect();
     send(AST, ast.as_bytes());
 
-    let chunk = match crate::compiler::compile(&stmts) {
+    let chunk = match crate::compiler::compile(&stmts, crate::optimize::Passes::ALL) {
         Ok(chunk) => chunk,
         Err(e) => return send(ERROR, e.as_bytes()),
     };

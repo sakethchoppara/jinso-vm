@@ -1,12 +1,12 @@
 use crate::ast::{BinOp, Expr, ExprKind, Stmt, UnOp};
 use crate::chunk::{Chunk, FnInfo, Op, UpvalueDesc};
-use crate::optimize::{FnLabels, Item, Label, relocate};
+use crate::optimize::{FnLabels, Item, Label, Passes, optimize, relocate};
 use crate::value::Value;
 use std::collections::HashMap;
 
 /// Walks the AST and emits stack-machine bytecode: first as an instruction list with
-/// symbolic jump labels, then laid out by `relocate`.
-pub fn compile(stmts: &[Stmt]) -> Result<Chunk, String> {
+/// symbolic jump labels, then optimized with `passes`, then laid out by `relocate`.
+pub fn compile(stmts: &[Stmt], passes: Passes) -> Result<Chunk, String> {
     let mut c = Compiler {
         chunk: Chunk::default(),
         globals: HashMap::new(),
@@ -18,6 +18,7 @@ pub fn compile(stmts: &[Stmt]) -> Result<Chunk, String> {
     for s in stmts {
         c.stmt(s)?;
     }
+    optimize(&mut c.items, &mut c.chunk.constants, passes);
     relocate(&c.items, &c.fn_labels, &mut c.chunk)?;
     Ok(c.chunk)
 }
