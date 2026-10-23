@@ -350,3 +350,34 @@ fn fusing_runs_after_folding() {
     assert_eq!(ops("print 2 + 3;"), ["Constant", "Print"]);
     assert_eq!(ops("let x = 1; print x + 2 * 3;"), ["Constant", "DefineGlobal", "GetGlobal", "AddConst", "Print"]);
 }
+
+#[test]
+fn superinstructions_and_their_fallbacks() {
+    // The VM fuses `GetLocal; GetLocal`, `GetLocal x; AddConst k; SetLocal x` and
+    // `Constant k; JumpIfNot<cmp>` while decoding. `run` checks every case against a VM
+    // without them, so these only need to reach each fast path and each fallback.
+    for (src, want) in [
+        // `let t = i;` ends with GetLocal i, and the loop starts with GetLocal n, so the
+        // pair is fused, and every iteration's back edge jumps to the pair's second half
+        ("fn f() { let i = 7; let n = 0; let t = i; while n < 3 { n = n + 1; } return [t, n]; } print f();", "[7, 3]\n"),
+        // x = x + k on an int local; on a string local (falls back to the string path)
+        ("fn f() { let x = 1; let i = 0; while i < 10 { x = x + 2; i = i + 1; } return x; } print f();", "21\n"),
+        ("fn f() { let s = \"a\"; let i = 0; while i < 3 { s = s + \"b\"; i = i + 1; } return s; } print f();", "abbb\n"),
+        // a different local on each side isn't the fused pattern
+        ("fn f() { let a = 1; let b = 5; b = a + 10; return [a, b]; } print f();", "[1, 11]\n"),
+        // compare with a constant, both ways
+        ("fn f(n) { if n < 2 { return \"small\"; } if n >= 10 { return \"big\"; } return \"mid\"; } print [f(1), f(5), f(10)];",
+         "[\"small\", \"mid\", \"big\"]\n"),
+    ] {
+        assert_eq!(run(src).as_deref(), Ok(want), "{src}");
+    }
+    // fallbacks report the original instruction's error, on its line
+    for (src, err) in [
+        ("fn f() {\n  let x = 9223372036854775807;\n  x = x + 1;\n}\nf();", "line 3: integer overflow"),
+        ("fn f() {\n  let x = nil;\n  x = x + 1;\n}\nf();", "line 3: operands must be two ints or two strs, got nil and int"),
+        ("fn f(n) {\n  if n < 2 { return 1; }\n}\nf(\"a\");", "line 2: operands must be ints, got str and int"),
+        ("fn f() {\n  let s = \"x\";\n  while s >= 1 { }\n}\nf();", "line 3: operands must be ints, got str and int"),
+    ] {
+        assert_eq!(run(src).unwrap_err(), err, "{src}");
+    }
+}

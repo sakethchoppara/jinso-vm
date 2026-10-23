@@ -9,6 +9,10 @@ syntax node, and it's what every v1 and v2 test was written against. So the opti
 needs no separate definition of "correct": for every program, `-O1` must print exactly what
 `-O0` prints, and fail exactly how `-O0` fails, with the same message and line.
 
+The reference is `-O0` on a VM with superinstructions turned off
+([0012](0012-superinstructions.md)), so the VM's own rewrites are checked the same way as
+the optimizer's.
+
 ## Where it's checked
 
 - **Every test.** `tests/common::run` runs each program four ways (`-O0` and `-O1`, each

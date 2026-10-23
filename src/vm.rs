@@ -93,6 +93,7 @@ fn show(s: &mut String, chunk: &Chunk, heap: &Heap, v: Value, path: &mut Vec<u32
 struct Instr {
     op: Op,
     arg: u16,  // the u16 operand, or 0 for opcodes without one
+    arg2: u32, // a superinstruction's second operand (see `fuse`)
     next: u32, // byte offset of the following instruction
 }
 
@@ -101,15 +102,60 @@ struct Instr {
 /// where an instruction starts are filled; the rest hold `Op::Bad` and are never reached.
 /// This moves the opcode lookup and the two-byte operand read out of the main loop.
 /// Decodes only what `out` doesn't have yet, since the REPL keeps appending code.
-fn predecode(code: &[u8], out: &mut Vec<Instr>) {
+fn predecode(code: &[u8], out: &mut Vec<Instr>, superinstructions: bool) {
     let mut ip = out.len();
-    out.resize(code.len(), Instr { op: Op::Bad, arg: 0, next: 0 });
+    let from = ip;
+    out.resize(code.len(), Instr { op: Op::Bad, arg: 0, arg2: 0, next: 0 });
     while ip < code.len() {
         let op = Op::ALL[code[ip] as usize];
         let next = ip + 1 + op.operand_len();
         let arg = if op.operand_len() == 2 { u16::from_be_bytes([code[ip + 1], code[ip + 2]]) } else { 0 };
-        out[ip] = Instr { op, arg, next: next as u32 };
+        out[ip] = Instr { op, arg, arg2: 0, next: next as u32 };
         ip = next;
+    }
+    if superinstructions {
+        fuse(out, from);
+    }
+}
+
+/// Replaces common instruction sequences with one superinstruction each, stored at the
+/// first instruction's offset. Only that entry changes: the instructions after it keep
+/// their own plain entries, so a jump into the middle of a sequence still works, and a
+/// superinstruction can fall back by jumping to them (`ip = at + 3`) when its fast path
+/// doesn't apply, letting the plain instructions do the work and report any error with
+/// the usual message and line.
+fn fuse(code: &mut [Instr], from: usize) {
+    let mut ip = from;
+    while ip < code.len() {
+        let a = code[ip];
+        let b = code.get(a.next as usize).copied();
+        let c = b.and_then(|b| code.get(b.next as usize).copied());
+        let fused = match (a.op, b.map(|b| b.op), c.map(|c| c.op)) {
+            (Op::GetLocal, Some(Op::AddConst), Some(Op::SetLocal)) if c.unwrap().arg == a.arg => {
+                let (b, c) = (b.unwrap(), c.unwrap());
+                Some(Instr { op: Op::AddConstToLocal, arg: a.arg, arg2: b.arg as u32, next: c.next })
+            }
+            (Op::GetLocal, Some(Op::GetLocal), _) => {
+                let b = b.unwrap();
+                Some(Instr { op: Op::GetLocal2, arg: a.arg, arg2: b.arg as u32, next: b.next })
+            }
+            (Op::Constant, Some(op @ (Op::JumpIfNotLt | Op::JumpIfNotLe | Op::JumpIfNotGt | Op::JumpIfNotGe)), _) => {
+                let b = b.unwrap();
+                let op = match op {
+                    Op::JumpIfNotLt => Op::JumpIfNotLtConst,
+                    Op::JumpIfNotLe => Op::JumpIfNotLeConst,
+                    Op::JumpIfNotGt => Op::JumpIfNotGtConst,
+                    _ => Op::JumpIfNotGeConst,
+                };
+                // arg2: the jump's absolute target
+                Some(Instr { op, arg: a.arg, arg2: b.next + b.arg as u32, next: b.next })
+            }
+            _ => None,
+        };
+        if let Some(f) = fused {
+            code[ip] = f;
+        }
+        ip = a.next as usize;
     }
 }
 
@@ -137,6 +183,16 @@ pub fn run_limited(chunk: &Chunk, out: &mut impl Write, gc_stress: bool, steps: 
     Ok(vm.stats())
 }
 
+/// `run_limited` without superinstructions: every instruction runs exactly as compiled.
+/// Differential testing compares against this, so the VM's own rewrites are checked too,
+/// not only the optimizer's.
+pub fn run_reference(chunk: &Chunk, out: &mut impl Write, gc_stress: bool, steps: u64) -> Result<Stats, String> {
+    let mut vm = Vm::new(gc_stress);
+    vm.superinstructions = false;
+    vm.run(chunk, 0, out, steps)?;
+    Ok(vm.stats())
+}
+
 /// The VM's state that outlives one run. The REPL keeps a `Vm` across inputs, so globals,
 /// functions and everything on the heap stay alive; `vm::run` uses a fresh one.
 ///
@@ -155,6 +211,8 @@ pub struct Vm {
     literals: Vec<u32>,
     /// `Chunk::code`, decoded.
     code: Vec<Instr>,
+    /// Whether decoding fuses common sequences into superinstructions (see `fuse`).
+    superinstructions: bool,
 }
 
 impl Vm {
@@ -167,6 +225,7 @@ impl Vm {
             constants: Vec::new(),
             literals: Vec::new(),
             code: Vec::new(),
+            superinstructions: true,
         }
     }
 
@@ -196,7 +255,7 @@ impl Vm {
         for name in &chunk.global_names[self.globals.len()..] {
             self.globals.push(NATIVES.iter().position(|(n, ..)| n == name).map(|i| Value::Native(i as u8)));
         }
-        predecode(&chunk.code, &mut self.code);
+        predecode(&chunk.code, &mut self.code, self.superinstructions);
 
         let result = self.execute(chunk, start, out, steps);
         if result.is_err() {
@@ -225,7 +284,7 @@ impl Vm {
 
         while ip < code.len() {
             let at = ip;
-            let Instr { op, arg, next } = code[ip];
+            let Instr { op, arg, arg2, next } = code[ip];
             let arg = arg as usize;
             ip = next as usize;
             let err = |msg: String| format!("line {}: {msg}", chunk.lines[at]);
@@ -279,7 +338,27 @@ impl Vm {
                 }};
             }
 
-            // Pop two ints and jump unless `a OP b` holds.
+            // Superinstruction `Constant k; JumpIfNot<cmp>`: compare the top of the stack with
+        // constant k. Anything but two ints falls back to the plain jump instruction.
+        macro_rules! cmp_const_jump {
+            ($cmp:tt) => {{
+                let n = stack.len();
+                match (stack[n - 1], constants[arg]) {
+                    (Value::Int(x), Value::Int(y)) => {
+                        stack.pop();
+                        if !(x $cmp y) {
+                            ip = arg2 as usize;
+                        }
+                    }
+                    (_, k) => {
+                        stack.push(k);
+                        ip = at + 3;
+                    }
+                }
+            }};
+        }
+
+        // Pop two ints and jump unless `a OP b` holds.
             macro_rules! cmp_jump {
                 ($cmp:tt) => {{
                     let n = stack.len();
@@ -490,6 +569,30 @@ impl Vm {
                     stack.push(Value::Bool(eq));
                 }
                 Op::Bad => unreachable!("corrupt bytecode at {at}"),
+                Op::GetLocal2 => {
+                    stack.push(stack[base + arg]);
+                    stack.push(stack[base + arg2 as usize]);
+                }
+                // `x = x + k` on an int local. Anything else (strings, overflow) pushes x
+                // and resumes at the plain `AddConst; SetLocal`.
+                Op::AddConstToLocal => {
+                    let slot = base + arg;
+                    let sum = match (stack[slot], constants[arg2 as usize]) {
+                        (Value::Int(x), Value::Int(y)) => x.checked_add(y),
+                        _ => None,
+                    };
+                    match sum {
+                        Some(v) => stack[slot] = Value::Int(v),
+                        None => {
+                            stack.push(stack[slot]);
+                            ip = at + 3;
+                        }
+                    }
+                }
+                Op::JumpIfNotLtConst => cmp_const_jump!(<),
+                Op::JumpIfNotLeConst => cmp_const_jump!(<=),
+                Op::JumpIfNotGtConst => cmp_const_jump!(>),
+                Op::JumpIfNotGeConst => cmp_const_jump!(>=),
                 Op::Print => {
                     let mut s = String::new();
                     show(&mut s, chunk, heap, stack.pop().unwrap(), &mut Vec::new());

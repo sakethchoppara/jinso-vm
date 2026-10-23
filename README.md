@@ -330,7 +330,7 @@ but made the VM's main loop slower in cycles for every program, optimized or not
 `match` arms, each with its own copy of the error formatting, cost about 20%, and moving the
 formatting into one cold function cost even more. Merging them into one arm fixed it, and
 building with one codegen unit stopped unrelated code from changing how the main loop is
-inlined. In cycles (minimum of 5 runs), `-O1` against the v3 baseline is now: fib −1%,
+inlined. In cycles (minimum of 5 runs), `-O1` against the v3 baseline was, when v3 shipped: fib −1%,
 loop −10%, strings +6%, **6.7% fewer in total**; branchy runs 38% fewer cycles than at
 `-O0`. So the optimizer clearly removes work, its effect on time is smaller and uneven, and
 VM changes are now judged on cycles as well as instructions.
@@ -382,11 +382,14 @@ how its tests drive it.
 
 | Benchmark | jinso | CPython 3.13.5 | jinso vs CPython | jinso instructions |
 |---|---|---|---|---|
-| branchy | 0.075s | 0.118s | 1.57x faster | 843M |
-| fib | 0.114s | 0.115s | 1.01x faster | 1069M |
-| loop | 0.420s | 0.607s | 1.45x faster | 4342M |
-| primes | 0.176s | 0.178s | 1.01x faster | 1603M |
-| strings | 0.064s | 0.071s | 1.11x faster | 663M |
+| branchy | 0.064s | 0.120s | 1.88x faster | 632M |
+| fib | 0.124s | 0.118s | 1.05x slower | 1054M |
+| loop | 0.386s | 0.647s | 1.68x faster | 3342M |
+| primes | 0.169s | 0.177s | 1.05x faster | 1379M |
+| strings | 0.061s | 0.070s | 1.15x faster | 579M |
+
+fib is a tie: across back-to-back runs it moves between 1.12x faster and 1.05x slower,
+while its instruction and cycle counts don't change.
 
 | Program | What it measures |
 |---|---|
@@ -401,7 +404,16 @@ benchmark built on arrays, and each `composite[j] = true` called out-of-line fun
 its bounds and type checks. Inlining those helpers and checking the common case (an array
 and an in-range int) directly in `Index` and `SetIndex`, with errors explained out of line,
 cut its cycles by 11% and brought it level with CPython
-([0011](docs/decisions/0011-fast-array-access.md)). The Python version is a line-for-line
+([0011](docs/decisions/0011-fast-array-access.md)). Superinstructions then made it slightly
+faster than CPython.
+
+**Superinstructions.** While decoding, the VM fuses the instruction sequences that execute
+together most often: `GetLocal a; GetLocal b`, `x = x + k` on a local, and `Constant k`
+before a compare-and-branch. Only the VM's decoded copy changes, so the bytecode,
+optimizer and disassembler are untouched, a jump into the middle of a fused sequence lands
+on the plain instructions, and anything but ints falls back to them, errors included. Cycles:
+branchy −16%, loop −9%, strings −5%, primes −4%, fib −1%
+([0012](docs/decisions/0012-superinstructions.md)). The Python version is a line-for-line
 match with `while` loops; idiomatic Python would hand the sieve to C with slice assignment
 (`composite[p*p//2::p] = ...`), which is a different implementation rather than the same
 algorithm.
@@ -448,15 +460,15 @@ short view keeps its whole buffer alive.
 
 ## Testing
 
-- **Tests**: about 277 cases in 60 tests. `tests/lang.rs` covers every opcode, precedence
+- **Tests**: about 284 cases in 61 tests. `tests/lang.rs` covers every opcode, precedence
   and associativity, scoping, closures at one, two and three levels of nesting, arrays and
   aliasing, cycles, and every runtime and syntax error path; `tests/escapes.rs` every escape
   and escape error with its position; `tests/optimize.rs` what each pass must and must not
   do, line numbers after folding, jump threading in nested loops, and the optimizer's cost;
   `tests/repl.rs` piped sessions: multi-line blocks, recovery from runtime, syntax and
   compile errors, closures across inputs, and 100 inputs of globals under `--gc-stress`.
-  Every program and session runs four ways, at `-O0` and `-O1`, each normally and under
-  `--gc-stress`, and all four must agree.
+  Every program and session runs at `-O0` and `-O1`, each normally and under `--gc-stress`,
+  and must agree with the reference: `-O0` on a VM without superinstructions.
 - **Fuzzing** (`examples/fuzz.rs`): feeds random token soup, including array, closure and
   escape fragments, and mutated example programs through the whole pipeline with debug
   assertions on, at both `-O0` and `-O1`; any difference between them fails the run. Programs run under a step budget (`vm::run_limited`, which counts loop iterations and
@@ -483,6 +495,7 @@ short view keeps its whole buffer alive.
 - [0009](docs/decisions/0009-repl-state-model.md): what the REPL keeps between inputs, and what an error resets
 - [0010](docs/decisions/0010-continuation-detection.md): the parser, not a brace count, decides when to read another line
 - [0011](docs/decisions/0011-fast-array-access.md): fast array access, and an inlined `push` that didn't pay
+- [0012](docs/decisions/0012-superinstructions.md): superinstructions fused while decoding, and a reference VM without them
 
 ## Not yet
 

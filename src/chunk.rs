@@ -58,6 +58,15 @@ opcodes! {
     Gt,
     Print,
     Bad, // never emitted; marks offsets in the VM's decoded code that aren't instruction starts
+    // Superinstructions: never in bytecode. The VM's decoder fuses common sequences into
+    // these (see vm::fuse); each falls back to the plain instructions it replaced whenever
+    // its operands aren't the ints its fast path handles.
+    GetLocal2,       // GetLocal a; GetLocal b
+    AddConstToLocal, // GetLocal x; AddConst k; SetLocal x
+    JumpIfNotLtConst, // Constant k; JumpIfNotLt (and the three below)
+    JumpIfNotLeConst,
+    JumpIfNotGtConst,
+    JumpIfNotGeConst,
 }
 
 impl Op {

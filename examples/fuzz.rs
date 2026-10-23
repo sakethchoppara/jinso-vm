@@ -121,7 +121,8 @@ fn check(src: &str, gc_stress: bool) -> Result<(), String> {
     if src.contains("while") {
         return Ok(());
     }
-    let a = jinso::execute(src, Passes::NONE, gc_stress, 100_000);
+    // The reference: unoptimized, and no superinstructions in the VM either.
+    let a = jinso::execute_reference(src, gc_stress, 100_000);
     let b = jinso::execute(src, Passes::ALL, gc_stress, 100_000);
     // The budget counts loop jumps and calls; threading can turn a Jump into a Loop, so
     // which line a "step limit reached" error names can legitimately differ. Inconclusive.
