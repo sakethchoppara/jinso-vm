@@ -1,6 +1,6 @@
 // Runs jinso.wasm off the main thread, so the page can kill a program that never ends.
 // The wasm module reports back through emit(kind, ptr, len); each call becomes one message.
-const KINDS = ['output', 'error', 'bytecode', 'ast', 'gc']; // same order as src/wasm.rs
+const KINDS = ['output', 'error', 'bytecode', 'ast', 'gc', 'bytecodeO0']; // same order as src/wasm.rs
 const enc = new TextEncoder();
 const dec = new TextDecoder();
 let memory;

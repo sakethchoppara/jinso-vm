@@ -46,6 +46,8 @@
   .pane-head span, .tab { padding: 8px 14px; color: var(--muted); }
   .tab { background: none; border: 0; border-radius: 0; border-bottom: 2px solid transparent; margin-bottom: -1px; }
   .tab[aria-selected="true"] { color: var(--text); border-bottom-color: var(--accent); }
+  .pane-head label { margin-left: auto; padding: 8px 14px; font-size: 13px; }
+  .pane-head label[hidden] { display: none; }
 
   .editor { flex: 1; min-height: 0; display: flex; font: 14px/1.6 var(--mono); }
   #gutter { margin: 0; padding: 12px 6px 12px 14px; color: var(--gutter); text-align: right; user-select: none; overflow: hidden; }
@@ -92,6 +94,7 @@
       <button class="tab" role="tab" data-tab="output" aria-selected="true">Output</button>
       <button class="tab" role="tab" data-tab="bytecode" aria-selected="false">Bytecode</button>
       <button class="tab" role="tab" data-tab="ast" aria-selected="false">Syntax tree</button>
+      <label id="unopt-label" hidden><input type="checkbox" id="unopt"> unoptimized (-O0)</label>
     </div>
     <pre id="out" role="tabpanel" tabindex="0"></pre>
   </section>
@@ -230,6 +233,7 @@ for (const t of document.querySelectorAll('.tab')) {
   t.onclick = () => {
     tab = t.dataset.tab;
     for (const o of document.querySelectorAll('.tab')) o.setAttribute('aria-selected', o === t);
+    $('unopt-label').hidden = tab !== 'bytecode';
     render();
   };
 }
@@ -288,6 +292,12 @@ function line(text, cls) {
   return s;
 }
 
+// The Bytecode tab shows -O1 by default and -O0 when the checkbox is ticked.
+function shown() {
+  return tab === 'bytecode' && $('unopt').checked ? 'bytecodeO0' : tab;
+}
+$('unopt').onchange = () => render();
+
 function render() {
   // Follow streaming output (and the final error) unless the reader has scrolled up.
   const atBottom = out.scrollTop + out.clientHeight >= out.scrollHeight - 4;
@@ -298,8 +308,8 @@ function render() {
     if (result.error) out.append(line(result.error, 'err'));
     if (result.done && !result.output && !result.error) out.append(line('(no output)', 'note'));
     if (atBottom) out.scrollTop = out.scrollHeight;
-  } else if (result[tab]) {
-    out.append(result[tab]);
+  } else if (result[shown()]) {
+    out.append(result[shown()]);
   } else if (result.done) {
     out.append(line(result.error ? 'Fix the errors to see this.' : '(empty program)', 'note'));
   }

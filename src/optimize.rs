@@ -4,6 +4,7 @@
 
 use crate::chunk::{Chunk, Op};
 use crate::value::Value;
+use std::collections::HashSet;
 
 pub type Label = u32;
 
@@ -102,18 +103,24 @@ fn emit(chunk: &mut Chunk, op: Op, arg: u16, line: u32) {
 pub struct Passes {
     pub fold: bool,
     pub cond: bool,
+    pub thread: bool,
+    pub dead_jumps: bool,
+    pub unreachable: bool,
 }
 
 impl Passes {
-    pub const NONE: Passes = Passes { fold: false, cond: false };
-    pub const ALL: Passes = Passes { fold: true, cond: true };
-    pub const NAMES: &[&str] = &["fold", "cond"];
+    pub const NONE: Passes = Passes { fold: false, cond: false, thread: false, dead_jumps: false, unreachable: false };
+    pub const ALL: Passes = Passes { fold: true, cond: true, thread: true, dead_jumps: true, unreachable: true };
+    pub const NAMES: &[&str] = &["fold", "cond", "thread", "deadjump", "unreachable"];
 
     /// Turns the named pass off; false if there's no such pass.
     pub fn disable(&mut self, name: &str) -> bool {
         match name {
             "fold" => self.fold = false,
             "cond" => self.cond = false,
+            "thread" => self.thread = false,
+            "deadjump" => self.dead_jumps = false,
+            "unreachable" => self.unreachable = false,
             _ => return false,
         }
         true
@@ -121,8 +128,10 @@ impl Passes {
 }
 
 /// Runs the enabled passes until none of them changes anything, at most 10 rounds.
-/// `constants` is the chunk's constant pool, which folding adds results to.
-pub fn optimize(items: &mut Vec<Item>, constants: &mut Vec<Value>, passes: Passes) {
+/// `constants` is the chunk's constant pool, which folding adds results to. `entries` are
+/// labels reached from outside the instruction stream (function bodies, entered by
+/// `Call`), which unreachable-code removal must keep.
+pub fn optimize(items: &mut Vec<Item>, constants: &mut Vec<Value>, entries: &[Label], passes: Passes) {
     for _ in 0..10 {
         let mut changed = false;
         if passes.fold {
@@ -130,6 +139,15 @@ pub fn optimize(items: &mut Vec<Item>, constants: &mut Vec<Value>, passes: Passe
         }
         if passes.cond {
             changed |= rewrite_tail(items, |tail| constant_condition(tail, constants));
+        }
+        if passes.thread {
+            changed |= thread_jumps(items);
+        }
+        if passes.dead_jumps {
+            changed |= remove_dead_jumps(items);
+        }
+        if passes.unreachable {
+            changed |= remove_unreachable(items, entries);
         }
         if !changed {
             break;
@@ -246,4 +264,111 @@ fn constant_condition(tail: &[Item], constants: &[Value]) -> Option<(usize, Vec<
         _ => return None,
     };
     Some((n, if jumps { vec![Item::Goto { target, line }] } else { vec![] }))
+}
+
+/// Index of each label's `Item::Label` in `items`.
+fn label_positions(items: &[Item]) -> Vec<usize> {
+    let mut pos = Vec::new();
+    for (i, item) in items.iter().enumerate() {
+        if let Item::Label(l) = *item {
+            if pos.len() <= l as usize {
+                pos.resize(l as usize + 1, usize::MAX);
+            }
+            pos[l as usize] = i;
+        }
+    }
+    pos
+}
+
+/// Jump threading: a jump to a label whose first instruction is `Goto M` might as well jump
+/// to M. Follows chains. A conditional jump only takes a target that's still ahead of it,
+/// because the VM's conditional jumps are forward-only; an unconditional one can go either
+/// way (relocation turns it into `Loop` if needed).
+fn thread_jumps(items: &mut [Item]) -> bool {
+    let pos = label_positions(items);
+    let goto_at = |l: Label| match items[pos[l as usize]..].iter().find(|it| !matches!(it, Item::Label(_))) {
+        Some(Item::Goto { target, .. }) => Some(*target),
+        _ => None,
+    };
+    let mut retarget = Vec::new();
+    for (i, item) in items.iter().enumerate() {
+        let (target, conditional) = match *item {
+            Item::Goto { target, .. } => (target, false),
+            Item::Branch { target, .. } => (target, true),
+            _ => continue,
+        };
+        let (mut t, mut best) = (target, target);
+        // Bounded, because `L: Goto M; M: Goto L` (an empty infinite loop) is a cycle.
+        for _ in 0..items.len() {
+            match goto_at(t) {
+                Some(next) if next != t => {
+                    t = next;
+                    if !conditional || pos[t as usize] > i {
+                        best = t;
+                    }
+                }
+                _ => break,
+            }
+        }
+        if best != target {
+            retarget.push((i, best));
+        }
+    }
+    for &(i, new) in &retarget {
+        match &mut items[i] {
+            Item::Goto { target, .. } | Item::Branch { target, .. } => *target = new,
+            _ => unreachable!(),
+        }
+    }
+    !retarget.is_empty()
+}
+
+/// A `Goto` to a label with nothing but labels between them does nothing. (Conditional
+/// jumps stay: they still pop and type-check their condition.)
+fn remove_dead_jumps(items: &mut Vec<Item>) -> bool {
+    let dead: Vec<bool> = (0..items.len())
+        .map(|i| match items[i] {
+            Item::Goto { target, .. } => items[i + 1..]
+                .iter()
+                .take_while(|it| matches!(it, Item::Label(_)))
+                .any(|it| *it == Item::Label(target)),
+            _ => false,
+        })
+        .collect();
+    let mut i = 0;
+    items.retain(|_| {
+        i += 1;
+        !dead[i - 1]
+    });
+    dead.contains(&true)
+}
+
+/// Code after a `Return` or `Goto` can only run if something jumps to it, so everything up
+/// to the next label that's actually jumped to (or is a function's entry) is dropped. This
+/// also removes the implicit `return nil;` after a function's last `return`. Labels are
+/// always kept, since they mark positions (like a function's end) even when unused.
+fn remove_unreachable(items: &mut Vec<Item>, entries: &[Label]) -> bool {
+    let mut live: HashSet<Label> = entries.iter().copied().collect();
+    for item in items.iter() {
+        if let Item::Goto { target, .. } | Item::Branch { target, .. } = *item {
+            live.insert(target);
+        }
+    }
+    let before = items.len();
+    let mut dead = false;
+    items.retain(|item| match item {
+        Item::Label(l) => {
+            if live.contains(l) {
+                dead = false;
+            }
+            true
+        }
+        _ if dead => false,
+        Item::Goto { .. } | Item::Ins { op: Op::Return, .. } => {
+            dead = true;
+            true
+        }
+        _ => true,
+    });
+    items.len() != before
 }

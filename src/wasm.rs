@@ -18,6 +18,7 @@ const ERROR: u32 = 1;
 const BYTECODE: u32 = 2;
 const AST: u32 = 3;
 const GC: u32 = 4;
+const BYTECODE_O0: u32 = 5;
 
 /// Keeps `while true { print 1; }` from flooding the page with messages.
 const MAX_LINES: usize = 10_000;
@@ -67,7 +68,7 @@ pub extern "C" fn alloc(len: usize) -> *mut u8 {
 }
 
 /// Compiles and runs the source written at `ptr`, emitting the syntax tree and bytecode
-/// first, then output as it is printed, then the error or GC stats.
+/// (optimized, then unoptimized) first, then output as it is printed, then the error or GC stats.
 ///
 /// # Safety
 /// `ptr` must come from `alloc(len)` and hold `len` written bytes; it is freed here.
@@ -88,6 +89,9 @@ pub unsafe extern "C" fn run(ptr: *mut u8, len: usize, gc_stress: u32) {
         Err(e) => return send(ERROR, e.as_bytes()),
     };
     send(BYTECODE, crate::disasm::disassemble(&chunk).as_bytes());
+    if let Ok(unoptimized) = crate::compiler::compile(&stmts, crate::optimize::Passes::NONE) {
+        send(BYTECODE_O0, crate::disasm::disassemble(&unoptimized).as_bytes());
+    }
 
     let mut out = JsOut { pending: Vec::new(), lines: 0 };
     let result = crate::vm::run(&chunk, &mut out, gc_stress != 0);

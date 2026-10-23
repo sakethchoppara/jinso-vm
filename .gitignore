@@ -2,3 +2,4 @@
 /web/jinso.wasm
 perf.data
 perf.data.old
+fuzz-*.jo

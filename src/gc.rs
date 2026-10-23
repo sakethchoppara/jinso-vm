@@ -13,6 +13,10 @@ const INITIAL_THRESHOLD: usize = 1 << 20;
 /// every value holding the handle sees every change.
 pub struct Heap {
     objects: Vec<Option<Obj>>,
+    /// Handles of every allocated object, so sweeping costs O(live objects) rather than
+    /// O(slots ever used). Under --gc-stress, slots are never reused, and sweeping every
+    /// slot made a program allocating 100,000 objects take minutes.
+    live: Vec<u32>,
     free: Vec<u32>,
     /// Gray objects during marking. Kept between collections to reuse its allocation.
     work: Vec<u32>,
@@ -71,6 +75,7 @@ impl Heap {
     pub fn new(literals: &[String], stress: bool) -> Heap {
         let mut heap = Heap {
             objects: Vec::new(),
+            live: Vec::new(),
             free: Vec::new(),
             work: Vec::new(),
             bytes: 0,
@@ -158,7 +163,7 @@ impl Heap {
         let obj = Some(Obj { marked: false, kind });
         // In stress mode freed slots are never reused, so a stale handle hits None and
         // panics instead of silently reading whatever got allocated there next.
-        match self.free.pop().filter(|_| !self.stress) {
+        let h = match self.free.pop().filter(|_| !self.stress) {
             Some(h) => {
                 self.objects[h as usize] = obj;
                 h
@@ -167,7 +172,9 @@ impl Heap {
                 self.objects.push(obj);
                 self.objects.len() as u32 - 1
             }
-        }
+        };
+        self.live.push(h);
+        h
     }
 
     pub fn alloc_str(&mut self, s: String) -> Value {
@@ -236,18 +243,22 @@ impl Heap {
         }
         self.work = work;
 
-        for (h, slot) in self.objects.iter_mut().enumerate() {
-            match slot {
-                Some(obj) if obj.marked => obj.marked = false,
-                Some(obj) => {
-                    self.bytes -= size(&obj.kind);
-                    self.freed += 1;
-                    *slot = None;
-                    self.free.push(h as u32);
-                }
-                None => {}
+        let (objects, free) = (&mut self.objects, &mut self.free);
+        let (mut bytes, mut freed) = (self.bytes, self.freed);
+        self.live.retain(|&h| {
+            let slot = &mut objects[h as usize];
+            let obj = slot.as_mut().expect("live list holds a freed handle");
+            if obj.marked {
+                obj.marked = false;
+                return true;
             }
-        }
+            bytes -= size(&obj.kind);
+            freed += 1;
+            *slot = None;
+            free.push(h);
+            false
+        });
+        (self.bytes, self.freed) = (bytes, freed);
         self.collections += 1;
         self.next_gc = (self.bytes * 2).max(INITIAL_THRESHOLD);
     }
@@ -256,7 +267,7 @@ impl Heap {
         Stats {
             collections: self.collections,
             freed: self.freed,
-            live: self.objects.iter().flatten().count(),
+            live: self.live.len(),
             peak_work: self.peak_work,
         }
     }

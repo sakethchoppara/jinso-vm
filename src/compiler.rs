@@ -18,7 +18,8 @@ pub fn compile(stmts: &[Stmt], passes: Passes) -> Result<Chunk, String> {
     for s in stmts {
         c.stmt(s)?;
     }
-    optimize(&mut c.items, &mut c.chunk.constants, passes);
+    let entries: Vec<Label> = c.fn_labels.iter().map(|f| f.start).collect();
+    optimize(&mut c.items, &mut c.chunk.constants, &entries, passes);
     relocate(&c.items, &c.fn_labels, &mut c.chunk)?;
     Ok(c.chunk)
 }

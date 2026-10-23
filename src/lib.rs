@@ -31,3 +31,30 @@ pub fn compile_with(src: &str, passes: optimize::Passes) -> Result<chunk::Chunk,
 pub fn run(src: &str, out: &mut impl Write) -> Result<(), String> {
     vm::run(&compile(src)?, out, false).map(|_| ())
 }
+
+/// What running a program produced: everything it printed and, if it failed, the error.
+#[derive(Debug, PartialEq)]
+pub struct Outcome {
+    pub output: String,
+    pub error: Option<String>,
+}
+
+/// Compiles with `passes` and runs under a step budget (`u64::MAX` for none).
+pub fn execute(src: &str, passes: optimize::Passes, gc_stress: bool, steps: u64) -> Outcome {
+    let mut out = Vec::new();
+    let error = compile_with(src, passes).and_then(|c| vm::run_limited(&c, &mut out, gc_stress, steps)).err();
+    Outcome { output: String::from_utf8_lossy(&out).into_owned(), error }
+}
+
+/// `--verify`: runs the program unoptimized and optimized and compares what they printed
+/// and how they failed, line numbers included. `-O0` is the specification for `-O1`, so any
+/// difference is an optimizer bug. Ok carries the (agreed) outcome.
+pub fn verify(src: &str, gc_stress: bool) -> Result<Outcome, String> {
+    let o0 = execute(src, optimize::Passes::NONE, gc_stress, u64::MAX);
+    let o1 = execute(src, optimize::Passes::ALL, gc_stress, u64::MAX);
+    if o0 == o1 {
+        Ok(o1)
+    } else {
+        Err(format!("-O0 and -O1 disagree\n-O0: {o0:?}\n-O1: {o1:?}"))
+    }
+}
