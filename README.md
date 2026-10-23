@@ -382,17 +382,28 @@ how its tests drive it.
 
 | Benchmark | jinso | CPython 3.13.5 | jinso vs CPython | jinso instructions |
 |---|---|---|---|---|
-| branchy | 0.072s | 0.120s | 1.67x faster | 857M |
-| fib | 0.112s | 0.113s | 1.01x faster | 1077M |
-| loop | 0.422s | 0.606s | 1.44x faster | 4542M |
-| strings | 0.064s | 0.071s | 1.11x faster | 673M |
+| branchy | 0.075s | 0.121s | 1.61x faster | 842M |
+| fib | 0.112s | 0.114s | 1.02x faster | 1070M |
+| loop | 0.418s | 0.611s | 1.46x faster | 4352M |
+| primes | 0.197s | 0.177s | 1.11x slower | 1767M |
+| strings | 0.063s | 0.070s | 1.11x faster | 664M |
 
 | Program | What it measures |
 |---|---|
 | `branchy` | 1 million iterations with a constant subexpression and an if/else chain |
 | `fib` | `fib(30)`: about 2.7 million recursive calls |
 | `loop` | 10 million iterations of arithmetic on locals |
+| `primes` | counting the 148,933 primes below 2 million with an odd-only Sieve of Eratosthenes |
 | `strings` | 1,000,000 appends of one character to a growing string |
+
+`primes` is the one CPython wins, and the profile says why: it's the only benchmark built on
+arrays, and array access is Jinso's least optimized path. Each `composite[j] = true` goes
+through bounds and type checks in functions the compiler doesn't inline (`element`,
+`Heap::array_mut`: about 10% of the run), and building the million-entry array calls the
+`push` built-in a million times (about 5%). CPython's list indexing is a tight C path. The
+Python version is a line-for-line match with `while` loops; idiomatic Python would hand the
+sieve to C with slice assignment (`composite[p*p//2::p] = ...`), which is a different
+implementation rather than the same algorithm.
 
 Wall-clock time moves by about ±5% between builds from code layout alone. Instructions
 executed, the last column, barely changes between runs, which is how a real 7–12% slowdown

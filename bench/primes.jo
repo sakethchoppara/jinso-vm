@@ -1,0 +1,33 @@
+// Count the primes up to n with an odd-only Sieve of Eratosthenes.
+// Index k stands for the odd number 2k + 1, so even numbers take no space or work.
+fn count_primes(n) {
+  let size = (n - 1) / 2;
+  let composite = [];
+  let k = 0;
+  while k <= size {
+    push(composite, false);
+    k = k + 1;
+  }
+  // Cross off odd multiples of each odd prime p, starting at p * p, stepping by 2p
+  // (which is p in index terms). Primes above sqrt(n) have nothing left to cross off.
+  let i = 1;
+  while (2 * i + 1) * (2 * i + 1) <= n {
+    if not composite[i] {
+      let p = 2 * i + 1;
+      let j = (p * p - 1) / 2;
+      while j <= size {
+        composite[j] = true;
+        j = j + p;
+      }
+    }
+    i = i + 1;
+  }
+  let count = 1; // 2, the only even prime
+  k = 1;
+  while k <= size {
+    if not composite[k] { count = count + 1; }
+    k = k + 1;
+  }
+  return count;
+}
+print count_primes(2000000);
