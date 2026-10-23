@@ -22,7 +22,9 @@ pub fn disassemble(chunk: &Chunk) -> String {
         if op.operand_len() == 2 {
             let i = chunk.read_u16(ip + 1) as usize;
             match op {
-                Op::Constant => write!(s, "{i:4}  ({})", chunk.show(chunk.constants[i])),
+                Op::Constant | Op::AddConst | Op::SubConst | Op::MulConst | Op::DivConst | Op::ModConst => {
+                    write!(s, "{i:4}  ({})", chunk.show(chunk.constants[i]))
+                }
                 Op::GetLocal | Op::SetLocal | Op::Call | Op::MakeArray => write!(s, "{i:4}"),
                 Op::GetUpvalue | Op::SetUpvalue => write!(s, "{i:4}  ({})", inside.map_or("?", |f| &f.upvalues[i].name)),
                 Op::Closure => {

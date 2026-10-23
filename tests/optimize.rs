@@ -4,7 +4,19 @@ use jinso::optimize::Passes;
 
 /// Instruction names in the optimized listing, in order.
 fn ops(src: &str) -> Vec<String> {
-    dis(src).lines().filter(|l| !l.starts_with("==")).filter_map(|l| l.get(10..).map(|r| r.split_whitespace().next().unwrap_or("").to_string())).collect()
+    names(&dis(src))
+}
+
+/// The same with every pass except `fuse`, for tests about folding: fusing would rename
+/// the `Add` they look for to `AddConst`.
+fn unfused(src: &str) -> Vec<String> {
+    let mut passes = Passes::ALL;
+    passes.disable("fuse");
+    names(&dis_at(src, passes))
+}
+
+fn names(listing: &str) -> Vec<String> {
+    listing.lines().filter(|l| !l.starts_with("==")).filter_map(|l| l.get(10..).map(|r| r.split_whitespace().next().unwrap_or("").to_string())).collect()
 }
 
 #[test]
@@ -30,9 +42,9 @@ fn folds_only_the_constant_part() {
     // x + 2 * 3: the 2 * 3 folds, the addition to a variable can't
     let src = "let x = 5; print x + 2 * 3;";
     assert_eq!(run(src).as_deref(), Ok("11\n"));
-    assert_eq!(ops(src), ["Constant", "DefineGlobal", "GetGlobal", "Constant", "Add", "Print"]);
-    // left to right: (x + 2) * 3 has no constant subexpression
-    assert!(ops("let x = 1; print x + 2 + 3;").contains(&"Add".to_string()));
+    assert_eq!(unfused(src), ["Constant", "DefineGlobal", "GetGlobal", "Constant", "Add", "Print"]);
+    // left to right: (x + 2) + 3 has no constant subexpression
+    assert_eq!(unfused("let x = 1; print x + 2 + 3;").iter().filter(|o| *o == "Add").count(), 2);
 }
 
 #[test]
@@ -52,7 +64,7 @@ fn never_folds_what_would_fail() {
         ("print \"a\" - 1;", "line 1: operands must be ints, got str and int", "Sub"),
     ] {
         assert_eq!(run(src).unwrap_err(), err, "{src}");
-        assert!(ops(src).contains(&kept.to_string()), "{src} should keep {kept}:\n{}", dis(src));
+        assert!(unfused(src).contains(&kept.to_string()), "{src} should keep {kept}:\n{}", dis(src));
     }
 }
 
@@ -75,8 +87,8 @@ fn never_folds_calls() {
 
 #[test]
 fn strings_are_not_folded() {
-    assert!(ops("print \"a\" + \"b\";").contains(&"Add".to_string()));
-    assert!(ops("print \"a\" == \"a\";").contains(&"Eq".to_string()));
+    assert!(unfused("print \"a\" + \"b\";").contains(&"Add".to_string()));
+    assert!(unfused("print \"a\" == \"a\";").contains(&"Eq".to_string()));
 }
 
 #[test]
@@ -297,4 +309,44 @@ fn optimizer_is_fast_on_the_largest_program() {
     let plain = start.elapsed();
     eprintln!("{} lines: compile -O0 {plain:?}, -O1 {optimized:?}", src.lines().count());
     assert!(optimized.as_millis() < 100, "optimizing took {optimized:?}");
+}
+
+#[test]
+fn fuses_constant_operands() {
+    let src = "fn f(n) { let i = 0; while i < n { i = i + 1; } return [i * 2, i - 1, i / 2, i % 3]; } print f(10);";
+    assert_eq!(run(src).as_deref(), Ok("[20, 9, 5, 1]\n"));
+    let listing = dis(src);
+    for op in ["AddConst", "MulConst", "SubConst", "DivConst", "ModConst"] {
+        assert!(listing.contains(op), "missing {op}:\n{listing}");
+    }
+    // string appends go through AddConst, keeping the in-place append
+    let (out, stats) = run_with("let s = \"\"; let i = 0; while i < 1000 { s = s + \"ab\"; i = i + 1; } print len(s);", true).unwrap();
+    assert_eq!((out.as_str(), stats.live), ("2000\n", 2));
+    assert!(dis("let s = \"a\"; print s + \"b\";").contains("AddConst"));
+}
+
+#[test]
+fn fused_instructions_fail_like_the_originals() {
+    for (src, err) in [
+        ("let x = 1;\nprint x / 0;", "line 2: division by zero"),
+        ("let x = 1;\nprint x % 0;", "line 2: division by zero"),
+        ("let x = 9223372036854775807;\nprint x + 1;", "line 2: integer overflow"),
+        ("let x = -9223372036854775807;\nprint x - 2;", "line 2: integer overflow"),
+        ("let x = 4611686018427387904;\nprint x * 2;", "line 2: integer overflow"),
+        ("let s = \"a\"; print s + 1;", "line 1: operands must be two ints or two strs, got str and int"),
+        ("let x = 1; print x + \"a\";", "line 1: operands must be two ints or two strs, got int and str"),
+        ("print nil + 1;", "line 1: operands must be two ints or two strs, got nil and int"),
+        ("let a = [1]; print a - 1;", "line 1: operands must be ints, got array and int"),
+        ("let s = \"a\"; print s * 2;", "line 1: operands must be ints, got str and int"),
+    ] {
+        assert_eq!(run(src).unwrap_err(), err, "{src}");
+        assert!(dis(src).contains("Const "), "{src} should use a fused instruction:\n{}", dis(src));
+    }
+}
+
+#[test]
+fn fusing_runs_after_folding() {
+    // 2 + 3 must fold to 5, not become `Constant 2; AddConst 3`
+    assert_eq!(ops("print 2 + 3;"), ["Constant", "Print"]);
+    assert_eq!(ops("let x = 1; print x + 2 * 3;"), ["Constant", "DefineGlobal", "GetGlobal", "AddConst", "Print"]);
 }

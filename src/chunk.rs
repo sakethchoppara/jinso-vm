@@ -44,6 +44,13 @@ opcodes! {
     Mul,
     Div,
     Mod,
+    // `Constant c` fused with the arithmetic after it, by the optimizer's fuse pass:
+    // u16 constant index; the left operand is on the stack.
+    AddConst,
+    SubConst,
+    MulConst,
+    DivConst,
+    ModConst,
     Neg,
     Not,
     Eq,
@@ -74,7 +81,12 @@ impl Op {
             | Op::Closure
             | Op::GetUpvalue
             | Op::SetUpvalue
-            | Op::MakeArray => 2,
+            | Op::MakeArray
+            | Op::AddConst
+            | Op::SubConst
+            | Op::MulConst
+            | Op::DivConst
+            | Op::ModConst => 2,
             _ => 0,
         }
     }

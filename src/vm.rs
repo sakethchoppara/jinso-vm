@@ -28,6 +28,23 @@ fn native_push(heap: &mut Heap, args: &[Value]) -> Result<Value, String> {
     Ok(Value::Nil)
 }
 
+// Int arithmetic shared by `Add` and `AddConst` (and so on), so both fail the same way.
+fn add(x: i64, y: i64) -> Result<Value, &'static str> {
+    x.checked_add(y).map(Value::Int).ok_or("integer overflow")
+}
+fn sub(x: i64, y: i64) -> Result<Value, &'static str> {
+    x.checked_sub(y).map(Value::Int).ok_or("integer overflow")
+}
+fn mul(x: i64, y: i64) -> Result<Value, &'static str> {
+    x.checked_mul(y).map(Value::Int).ok_or("integer overflow")
+}
+fn div(x: i64, y: i64) -> Result<Value, &'static str> {
+    if y == 0 { Err("division by zero") } else { x.checked_div(y).map(Value::Int).ok_or("integer overflow") }
+}
+fn rem(x: i64, y: i64) -> Result<Value, &'static str> {
+    if y == 0 { Err("division by zero") } else { x.checked_rem(y).map(Value::Int).ok_or("integer overflow") }
+}
+
 /// Checks `target[i]` and returns the array handle and element position.
 fn element(heap: &Heap, target: Value, i: Value) -> Result<(u32, usize), String> {
     let Value::Array(h) = target else {
@@ -174,6 +191,29 @@ pub fn run_limited(chunk: &Chunk, out: &mut impl Write, gc_stress: bool, steps: 
             }};
         }
 
+        // Pops two strings and pushes their concatenation.
+        macro_rules! concat_strings {
+            () => {{
+                let Some(Value::Str { h: bh, len: blen }) = stack.pop() else { unreachable!() };
+                let Some(Value::Str { h: ah, len: alen }) = stack.pop() else { unreachable!() };
+                if alen.checked_add(blen).is_none() {
+                    return Err(err("string too long (max 4 GiB)".into()));
+                }
+                let v = match heap.try_append((ah, alen), (bh, blen)) {
+                    Some(v) => v,
+                    None => {
+                        // Build the result as a plain String first: a and b are already off the
+                        // stack (no longer roots), so they must be copied before a collection
+                        // can free them.
+                        let s = [heap.get(ah, alen), heap.get(bh, blen)].concat();
+                        maybe_collect!();
+                        heap.alloc_str(s)
+                    }
+                };
+                stack.push(v);
+            }};
+        }
+
         // Pop two ints and jump unless `a OP b` holds.
         macro_rules! cmp_jump {
             ($cmp:tt) => {{
@@ -302,24 +342,33 @@ pub fn run_limited(chunk: &Chunk, out: &mut impl Write, gc_stress: bool, steps: 
                 base = frame.base;
                 closure = frame.closure;
             }
-            Op::Add if matches!(stack[stack.len() - 2..], [Value::Str { .. }, Value::Str { .. }]) => {
-                let Some(Value::Str { h: bh, len: blen }) = stack.pop() else { unreachable!() };
-                let Some(Value::Str { h: ah, len: alen }) = stack.pop() else { unreachable!() };
-                if alen.checked_add(blen).is_none() {
-                    return Err(err("string too long (max 4 GiB)".into()));
-                }
-                let v = match heap.try_append((ah, alen), (bh, blen)) {
-                    Some(v) => v,
-                    None => {
-                        // Build the result as a plain String first: a and b are already off the
-                        // stack (no longer roots), so they must be copied before a collection
-                        // can free them.
-                        let s = [heap.get(ah, alen), heap.get(bh, blen)].concat();
-                        maybe_collect!();
-                        heap.alloc_str(s)
+            Op::Add if matches!(stack[stack.len() - 2..], [Value::Str { .. }, Value::Str { .. }]) => concat_strings!(),
+            // One arm for all five, so the main loop gets one copy of the string path and of
+            // the error message, not five: five separate arms made the whole loop about 20%
+            // slower in cycles (docs/decisions/0006), even for programs that never used them.
+            Op::AddConst | Op::SubConst | Op::MulConst | Op::DivConst | Op::ModConst => {
+                let n = stack.len();
+                let (a, b) = (stack[n - 1], chunk.constants[arg]);
+                match (a, b) {
+                    (Value::Int(x), Value::Int(y)) => {
+                        let r = match op {
+                            Op::AddConst => add(x, y),
+                            Op::SubConst => sub(x, y),
+                            Op::MulConst => mul(x, y),
+                            Op::DivConst => div(x, y),
+                            _ => rem(x, y),
+                        };
+                        stack[n - 1] = r.map_err(|m| err(m.into()))?;
                     }
-                };
-                stack.push(v);
+                    (Value::Str { .. }, Value::Str { .. }) if op == Op::AddConst => {
+                        stack.push(b);
+                        concat_strings!()
+                    }
+                    _ => {
+                        let want = if op == Op::AddConst { "two ints or two strs" } else { "ints" };
+                        return Err(err(format!("operands must be {want}, got {} and {}", a.type_name(), b.type_name())));
+                    }
+                }
             }
             Op::MakeArray => {
                 // The elements are still on the stack, so a collection here can't free them.
@@ -340,17 +389,11 @@ pub fn run_limited(chunk: &Chunk, out: &mut impl Write, gc_stress: bool, steps: 
                 let (h, at) = element(&heap, target, i).map_err(err)?;
                 heap.array_mut(h)[at] = v;
             }
-            Op::Add => int_op!(|x, y| x.checked_add(y).map(Value::Int).ok_or("integer overflow")),
-            Op::Sub => int_op!(|x, y| x.checked_sub(y).map(Value::Int).ok_or("integer overflow")),
-            Op::Mul => int_op!(|x, y| x.checked_mul(y).map(Value::Int).ok_or("integer overflow")),
-            Op::Div => int_op!(|x, y| match y {
-                0 => Err("division by zero"),
-                _ => x.checked_div(y).map(Value::Int).ok_or("integer overflow"),
-            }),
-            Op::Mod => int_op!(|x, y| match y {
-                0 => Err("division by zero"),
-                _ => x.checked_rem(y).map(Value::Int).ok_or("integer overflow"),
-            }),
+            Op::Add => int_op!(add),
+            Op::Sub => int_op!(sub),
+            Op::Mul => int_op!(mul),
+            Op::Div => int_op!(div),
+            Op::Mod => int_op!(rem),
             Op::Lt => int_op!(|x, y| Ok(Value::Bool(x < y))),
             Op::Gt => int_op!(|x, y| Ok(Value::Bool(x > y))),
             Op::Neg => match stack.pop().unwrap() {

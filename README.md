@@ -5,8 +5,8 @@
 **[Try it in your browser →](https://sakethchoppara.github.io/jinso-vm/)**
 
 A small scripting language implemented from scratch in Rust: a lexer, a recursive-descent
-parser, a compiler that emits bytecode, a stack-based virtual machine with closures and
-arrays, and a mark-and-sweep garbage collector. No dependencies.
+parser, a compiler with a bytecode optimizer, a stack-based virtual machine with closures
+and arrays, and a mark-and-sweep garbage collector. No dependencies.
 
 ```
 fn make_counter() {
@@ -31,8 +31,11 @@ cargo build --release
 ./target/release/jinso dis examples/closures.jo          # show its bytecode
 ./target/release/jinso ast examples/arrays.jo            # show its syntax tree
 ./target/release/jinso run --gc-stress examples/strings.jo   # collect garbage on every allocation
+./target/release/jinso run -O0 examples/fib.jo           # without the optimizer (-O1 is the default)
+./target/release/jinso run --verify examples/fib.jo      # run at -O0 and -O1, fail if they differ
+./target/release/jinso dis --diff bench/branchy.jo       # unoptimized and optimized side by side
 
-cargo test                          # ~190 cases, each run normally and under --gc-stress
+cargo test                          # ~257 cases, each run at -O0 and -O1, normally and under --gc-stress
 ./scripts/bench.sh                  # benchmark against CPython
 cargo run --example fuzz -- 600     # 10 minutes of random input
 
@@ -84,19 +87,20 @@ in escaped form and a multi-line string doesn't break the listing.
 ## Architecture
 
 ```
-source ──▶ lexer ──▶ tokens ──▶ parser ──▶ AST ──▶ compiler ──▶ Chunk ──▶ VM
-           lexer.rs             parser.rs  ast.rs  compiler.rs  chunk.rs  vm.rs
-                                                                          │
-                                gc.rs: strings, arrays, closures ◀────────┤
-                                upvalues.rs: open upvalue list   ◀────────┘
+source ──▶ lexer ──▶ parser ──▶ AST ──▶ compiler ──▶ instructions ──▶ optimizer ──▶ Chunk ──▶ VM
+         lexer.rs   parser.rs  ast.rs  compiler.rs   with labels    optimize.rs   chunk.rs  vm.rs
+                                                                                              │
+                                                     gc.rs: strings, arrays, closures ◀───────┤
+                                                     upvalues.rs: open upvalue list   ◀───────┘
 ```
 
 | File | Role |
 |---|---|
-| `lexer.rs` | Source to tokens with line and column |
+| `lexer.rs` | Source to tokens with line and column; decodes string escapes |
 | `parser.rs` | Recursive descent for statements, precedence climbing for expressions, error recovery |
 | `ast.rs` | Syntax tree, printable as S-expressions (`jinso ast`) |
-| `compiler.rs` | AST to bytecode: resolves every name to a local slot, an upvalue or a global; backpatches jumps |
+| `compiler.rs` | AST to an instruction list whose jumps name labels; resolves every name to a local slot, an upvalue or a global |
+| `optimize.rs` | The optimizer's passes, and `relocate`, which lays the instruction list out as bytecode |
 | `chunk.rs` | Opcodes, the `Vec<u8>` bytecode, constant pool, line table, function and upvalue descriptors |
 | `vm.rs` | Decodes the bytecode once, then runs it: value stack, call frames, built-ins |
 | `gc.rs` | Heap of strings, arrays, closures and upvalues; mark-and-sweep with an explicit work stack |
@@ -107,7 +111,7 @@ source ──▶ lexer ──▶ tokens ──▶ parser ──▶ AST ──▶
 ### What `fib` compiles to
 
 ```
-0000    1 Jump           45  (-> 0048)      skip over the function body
+0000    1 Jump           39  (-> 0042)      skip over the function body
 == fn fib ==
 0003    2 GetLocal        0                 n is stack slot 0 of this frame
 0006    | Constant        0  (2)
@@ -116,20 +120,16 @@ source ──▶ lexer ──▶ tokens ──▶ parser ──▶ AST ──▶
 0015    | Return
 0016    3 GetGlobal       0  (fib)
 0019    | GetLocal        0
-0022    | Constant        1  (1)
-0025    | Sub
-0026    | Call            1
-0029    | GetGlobal       0  (fib)
-0032    | GetLocal        0
-0035    | Constant        2  (2)
-0038    | Sub
-0039    | Call            1
-0042    | Add
-0043    | Return
-0044    1 Constant        3  (nil)          implicit `return nil;`
-0047    | Return
-0048    | Constant        4  (<fn fib>)
-0051    | DefineGlobal    0  (fib)
+0022    | SubConst        1  (1)            `n - 1`: Constant 1 and Sub, fused by the optimizer
+0025    | Call            1
+0028    | GetGlobal       0  (fib)
+0031    | GetLocal        0
+0034    | SubConst        2  (2)
+0037    | Call            1
+0040    | Add
+0041    | Return                            (the unreachable `return nil` after it is gone)
+0042    1 Constant        4  (<fn fib>)
+0045    | DefineGlobal    0  (fib)
 ...
 ```
 
@@ -140,11 +140,14 @@ at least as strong as `min` and parses the right operand with `p + 1`, which mak
 `10 - 3 - 2` group as `(10 - 3) - 2`. `not` binds looser than comparisons, as in Python, so
 `not a < b` means `not (a < b)`.
 
-**Jump patching.** When the compiler reaches `if`, it doesn't yet know how long the body
-will be. It emits the jump with offset `0xFFFF`, remembers the operand's position, compiles
-the body, then writes the real offset back. `while` jumps backwards with `Loop`, whose
-offset is known immediately. `and`/`or` compile to the same jumps, so `false and 1/0 == 0`
-never divides.
+**Jumps and labels.** When the compiler reaches `if`, it doesn't yet know how long the body
+will be. It emits a jump to a fresh label, compiles the body, then places the label. The
+compiler's output is a list of instructions and labels, not bytes: `relocate` lays it out
+at the end, computing every jump offset and function address in one pass. An unconditional
+jump becomes `Jump` if its label is ahead and `Loop` if it's behind. (Through v2, jumps were
+emitted with a placeholder offset and backpatched; that broke as soon as an optimizer needed
+to remove an instruction: [0004](docs/decisions/0004-symbolic-jumps-and-relocation.md).)
+`and`/`or` compile to the same jumps, so `false and 1/0 == 0` never divides.
 
 **Variables.** Nothing is looked up by name at runtime. Globals are resolved to indices at
 compile time. A global's slot stays "undefined" until its `let` runs, so functions can call
@@ -270,27 +273,87 @@ globals root builds its string with `"a" + "b"`, so since the append optimizatio
 longer can. `arrays` and `closures` still catch it, which is why the experiment is rerun
 after every change to the heap rather than trusted from the first time.
 
+## The optimizer
+
+`-O1`, the default, runs six passes over the instruction list until none of them changes
+anything (at most 10 rounds), then `fuse` once at the end. Each can be turned off with
+`--no-PASS`, and `-O0` turns them all off.
+
+| Pass | What it does | Example |
+|---|---|---|
+| `fold` | evaluates operations on int, bool and nil literals | `2 * 3 + 1` → `Constant 7` |
+| `cond` | resolves branches on literal conditions | `if false { A }` → jump over A; `while true` loses its test |
+| `thread` | a jump to a jump goes straight to the final target | an if/else ending a loop body jumps to the loop start |
+| `unreachable` | drops code after `return` or a jump, up to a label something jumps to | the implicit `return nil` after a last `return` |
+| `deadjump` | drops a jump to the very next instruction | what `cond` and `unreachable` leave of `if false { ... }` |
+| `fuse` | `Constant c` followed by `Add`/`Sub`/`Mul`/`Div`/`Mod` becomes one `AddConst c` | `i + 1`, `n - 1`, `i % 7` in every hot loop |
+
+**It never changes what a program does.** Anything that would fail at runtime (overflow,
+division by zero, a type error) is left for the VM, so it still fails with the same message
+on the same line; calls are never folded, so side effects and their order are untouched;
+and every surviving instruction keeps its source line
+([0005](docs/decisions/0005-refusing-to-fold-errors.md)). This is checked by differential
+testing: `-O0` is the specification for `-O1`
+([0007](docs/decisions/0007-differential-testing.md)). Every test runs at both levels and
+must agree on output and errors, and so does every fuzzer input.
+
+**What it's worth**, in millions of instructions executed (`perf stat`), measured by
+turning one pass off at a time ([0006](docs/decisions/0006-which-passes-ship.md)):
+
+| | fib | loop | strings | branchy |
+|---|---|---|---|---|
+| `-O0` | 1128 | 4992 | 703 | 1217 |
+| `-O1` | **1077** | **4542** | **672** | **858** |
+| without `fold` | 1077 | 4542 | 673 | 1063 |
+| without `thread` | 1077 | 4542 | 673 | 868 |
+| without `fuse` | 1128 | 4992 | 704 | 961 |
+
+`cond`, `unreachable` and `deadjump` don't change these four, which have no literal
+conditions. Where they apply they matter: `cond` cuts a `while true` loop by 17%, and in a
+loop containing an `if false { ... }` debug block, `cond` saves 20% and `unreachable` and
+`deadjump` another 6% (each is needed: the jump over the block only becomes dead once the
+block is gone).
+
+Against the v3 baseline (fib 1135M, loop 5012M, strings 706M), `-O1` runs **8.2% fewer
+instructions** on the three original benchmarks. Nearly all of that is `fuse`: the PRD's
+other passes find nothing to fold or thread there, so a fourth benchmark, `branchy`, was
+added to measure them; on it `-O1` runs 30% fewer instructions than `-O0`.
+
+**Fewer instructions isn't always faster.** The first version of `fuse` cut instructions
+but made the VM's main loop slower in cycles for every program, optimized or not: five new
+`match` arms, each with its own copy of the error formatting, cost about 20%, and moving the
+formatting into one cold function cost even more. Merging them into one arm fixed it. In
+cycles, `-O1` is now 9% faster than the baseline on loop, 3% slower on fib and 6% slower on
+strings, about 5.5% faster in total. So the optimizer clearly removes work, but its effect on
+time is smaller and uneven, and VM changes are now judged on cycles as well as instructions.
+
+Optimizing costs about 0.2 ms on a 1,150-line program (every example and benchmark
+concatenated ten times): 0.34 ms to compile at `-O1` against 0.15 ms at `-O0`.
+
 ## Benchmarks
 
-`./scripts/bench.sh`: best of 5 runs, AMD Ryzen 7 5800HS, Linux, release build.
+`./scripts/bench.sh`: best of 10 runs, AMD Ryzen 7 5800HS, Linux, release build, `-O1`.
 
 | Benchmark | jinso | CPython 3.13.5 | jinso vs CPython | jinso instructions |
 |---|---|---|---|---|
-| fib | 0.116s | 0.114s | 1.02x slower | 1147M |
-| loop | 0.476s | 0.609s | 1.28x faster | 5072M |
-| strings | 0.063s | 0.072s | 1.14x faster | 710M |
+| branchy | 0.072s | 0.120s | 1.67x faster | 857M |
+| fib | 0.112s | 0.113s | 1.01x faster | 1077M |
+| loop | 0.422s | 0.606s | 1.44x faster | 4542M |
+| strings | 0.064s | 0.071s | 1.11x faster | 673M |
 
 | Program | What it measures |
 |---|---|
+| `branchy` | 1 million iterations with a constant subexpression and an if/else chain |
 | `fib` | `fib(30)`: about 2.7 million recursive calls |
 | `loop` | 10 million iterations of arithmetic on locals |
 | `strings` | 1,000,000 appends of one character to a growing string |
 
-Wall-clock time moves by about ±5% between builds from code layout alone, so the last
-column, instructions executed as counted by `perf stat`, is what to compare when judging a
-change to the VM. It barely changes between runs. That's how a real 7–12% slowdown from
-adding arrays and closures was found after wall-clock numbers had hidden part of it: see
-[`docs/decisions/0001`](docs/decisions/0001-call-path-regression-from-closures.md).
+Wall-clock time moves by about ±5% between builds from code layout alone. Instructions
+executed, the last column, barely changes between runs, which is how a real 7–12% slowdown
+from adding arrays and closures was found after wall-clock numbers had hidden part of it
+([0001](docs/decisions/0001-call-path-regression-from-closures.md)). But instructions alone
+can also mislead (see the optimizer section above), so changes to the VM are checked with
+`perf stat -e instructions,cycles`.
 
 ### Optimizations in v2, chosen by profiling
 
@@ -327,13 +390,16 @@ short view keeps its whole buffer alive.
 
 ## Testing
 
-- **Tests** (`tests/lang.rs`): about 190 cases in 21 tests, covering every opcode, precedence
+- **Tests**: about 257 cases in 46 tests. `tests/lang.rs` covers every opcode, precedence
   and associativity, scoping, closures at one, two and three levels of nesting, arrays and
-  aliasing, cycles, and every runtime and syntax error path. Every program runs twice,
-  normally and under `--gc-stress`, and both must agree.
-- **Fuzzing** (`examples/fuzz.rs`): feeds random token soup, including array and closure
-  fragments, and mutated example programs through the whole pipeline with debug assertions
-  on. Programs run under a step budget (`vm::run_limited`, which counts loop iterations and
+  aliasing, cycles, and every runtime and syntax error path; `tests/escapes.rs` every escape
+  and escape error with its position; `tests/optimize.rs` what each pass must and must not
+  do, line numbers after folding, jump threading in nested loops, and the optimizer's cost.
+  Every program runs four ways, at `-O0` and `-O1`, each normally and under `--gc-stress`,
+  and all four must agree.
+- **Fuzzing** (`examples/fuzz.rs`): feeds random token soup, including array, closure and
+  escape fragments, and mutated example programs through the whole pipeline with debug
+  assertions on, at both `-O0` and `-O1`; any difference between them fails the run. Programs run under a step budget (`vm::run_limited`, which counts loop iterations and
   calls), because a mutated `fib(9223372036854775807)` is a valid program that would run for
   longer than the universe has existed. An earlier 10-minute run sat on one such input for
   minutes, which looked like a hang. A 10-minute run (1,388,256 inputs) finds no panics,
@@ -348,6 +414,11 @@ short view keeps its whole buffer alive.
   arrays and closures, and measuring with instruction counts instead of wall-clock time
 - [0002](docs/decisions/0002-predecode-bytecode.md): decode bytecode once, before running
 - [0003](docs/decisions/0003-compare-and-branch.md): compare-and-branch for `if` and `while`
+- [0004](docs/decisions/0004-symbolic-jumps-and-relocation.md): labels and relocation instead of backpatching
+- [0005](docs/decisions/0005-refusing-to-fold-errors.md): the optimizer never folds anything that fails
+- [0006](docs/decisions/0006-which-passes-ship.md): which passes ship, and fewer instructions vs fewer cycles
+- [0007](docs/decisions/0007-differential-testing.md): differential testing, and what it can't catch
+- [0008](docs/decisions/0008-escape-decoding-in-the-lexer.md): escapes are decoded in the lexer
 
 ## Not yet
 

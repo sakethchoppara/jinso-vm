@@ -168,7 +168,8 @@ fn reports_multiple_syntax_errors() {
 
 #[test]
 fn disassembler_shows_jump_targets() {
-    let chunk = jinso::compile("let i = 0;\nwhile i < 3 {\n  i = i + 1;\n}").unwrap();
+    // -O0: this checks the compiler's own jump layout, not the optimizer's rewrites
+    let chunk = jinso::compile_with("let i = 0;\nwhile i < 3 {\n  i = i + 1;\n}", jinso::optimize::Passes::NONE).unwrap();
     let want = "\
 0000    1 Constant        0  (0)
 0003    | DefineGlobal    0  (i)

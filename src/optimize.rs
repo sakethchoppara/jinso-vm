@@ -106,12 +106,13 @@ pub struct Passes {
     pub thread: bool,
     pub dead_jumps: bool,
     pub unreachable: bool,
+    pub fuse: bool,
 }
 
 impl Passes {
-    pub const NONE: Passes = Passes { fold: false, cond: false, thread: false, dead_jumps: false, unreachable: false };
-    pub const ALL: Passes = Passes { fold: true, cond: true, thread: true, dead_jumps: true, unreachable: true };
-    pub const NAMES: &[&str] = &["fold", "cond", "thread", "deadjump", "unreachable"];
+    pub const NONE: Passes = Passes { fold: false, cond: false, thread: false, dead_jumps: false, unreachable: false, fuse: false };
+    pub const ALL: Passes = Passes { fold: true, cond: true, thread: true, dead_jumps: true, unreachable: true, fuse: true };
+    pub const NAMES: &[&str] = &["fold", "cond", "thread", "deadjump", "unreachable", "fuse"];
 
     /// Turns the named pass off; false if there's no such pass.
     pub fn disable(&mut self, name: &str) -> bool {
@@ -121,6 +122,7 @@ impl Passes {
             "thread" => self.thread = false,
             "deadjump" => self.dead_jumps = false,
             "unreachable" => self.unreachable = false,
+            "fuse" => self.fuse = false,
             _ => return false,
         }
         true
@@ -152,6 +154,11 @@ pub fn optimize(items: &mut Vec<Item>, constants: &mut Vec<Value>, entries: &[La
         if !changed {
             break;
         }
+    }
+    // Last, and once: fusing `Constant 3; Add` into `AddConst 3` would hide `2 + 3` from
+    // the folder, so it only runs after everything else has settled.
+    if passes.fuse {
+        rewrite_tail(items, fuse);
     }
 }
 
@@ -371,4 +378,21 @@ fn remove_unreachable(items: &mut Vec<Item>, entries: &[Label]) -> bool {
         _ => true,
     });
     items.len() != before
+}
+
+/// `Constant c; Add` becomes `AddConst c` (and likewise for Sub, Mul, Div, Mod): one
+/// instruction instead of two, and no push and pop of `c`. This is the pass aimed at the
+/// hot loops, where `i + 1`, `n - 1` and `i % 7` are everywhere. The fused instruction takes
+/// the operator's line, which is the line its errors report.
+fn fuse(tail: &[Item]) -> Option<(usize, Vec<Item>)> {
+    let [.., Item::Ins { op: Op::Constant, arg, .. }, Item::Ins { op, line, .. }] = tail else { return None };
+    let fused = match op {
+        Op::Add => Op::AddConst,
+        Op::Sub => Op::SubConst,
+        Op::Mul => Op::MulConst,
+        Op::Div => Op::DivConst,
+        Op::Mod => Op::ModConst,
+        _ => return None,
+    };
+    Some((2, vec![Item::Ins { op: fused, arg: *arg, line: *line }]))
 }
